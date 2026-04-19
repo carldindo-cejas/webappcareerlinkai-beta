@@ -1,0 +1,15 @@
+{
+    "name": "careerlinkai",
+    "version": "1.0.0",
+    "private": true,
+    "description": "CareerLinkAI — senior-high career guidance platform (React + Vite + Tailwind frontend, Cloudflare Workers + D1 backend, JWT auth).",
+    "scripts": {
+        "install:all": "npm --prefix apps/frontend install && npm --prefix apps/worker install",
+        "dev:frontend": "npm --prefix apps/frontend run dev",
+        "dev:worker": "npm --prefix apps/worker run dev",
+        "build": "npm --prefix apps/frontend run build",
+        "deploy:worker": "npm --prefix apps/worker run deploy",
+        "db:init": "npm --prefix apps/worker run db:init",
+        "db:init:remote": "npm --prefix apps/worker run db:init:remote"
+    }
+}

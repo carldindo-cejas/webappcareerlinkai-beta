@@ -1,0 +1,24 @@
+name = "careerlinkai"
+main = "src/index.ts"
+compatibility_date = "2024-11-06"
+compatibility_flags = ["nodejs_compat"]
+
+# Local dev binds the Worker to http://localhost:8787
+[dev]
+port = 8787
+
+# D1 database — run `wrangler d1 create careerlinkai` once, paste the id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "webappcareerlinkai-beta"
+database_id = "a9b922e5-0e01-4038-80a7-0f97f05a5c38"
+
+[vars]
+# For local dev only. In production use `wrangler secret put JWT_SECRET`.
+JWT_SECRET = "dev-secret-change-me-to-a-long-random-string"
+FRONTEND_ORIGIN = "https://careerlinkai.cejascarldindo.workers.dev"
+
+[assets]
+directory = "../frontend/dist"
+binding = "ASSETS"
+run_worker_first = true
