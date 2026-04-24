@@ -1,0 +1,52 @@
+name: Deploy Worker (Linux CI)
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "apps/frontend/**"
+      - "apps/worker/**"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-worker-master
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build Frontend + Deploy Worker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            apps/frontend/package-lock.json
+            apps/worker/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix apps/frontend
+
+      - name: Install worker dependencies
+        run: npm ci --prefix apps/worker
+
+      - name: Build frontend production bundle
+        run: npm --prefix apps/frontend run build
+
+      - name: Deploy Cloudflare Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: apps/worker
+          command: deploy

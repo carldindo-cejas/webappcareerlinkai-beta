@@ -10,8 +10,6 @@ type ProfileResponse = {
   gradeLevel?: string | null;
   gender?: string | null;
   birthdate?: string | null;
-  aiExternalConsent?: boolean;
-  aiExternalConsentAt?: number | null;
 };
 
 type Tab = 'profile' | 'password';
@@ -27,9 +25,6 @@ export default function StudentSettings() {
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileMsg, setProfileMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
-  const [aiExternalConsent, setAiExternalConsent] = useState(false);
-  const [savingConsent, setSavingConsent] = useState(false);
-  const [consentMsg, setConsentMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -47,34 +42,11 @@ export default function StudentSettings() {
         setGradeLevel(p.gradeLevel || '');
         setGender(p.gender || '');
         setBirthdate(p.birthdate || '');
-        setAiExternalConsent(!!p.aiExternalConsent);
       })
       .catch(() => {})
       .finally(() => !cancelled && setLoadingProfile(false));
     return () => { cancelled = true; };
   }, []);
-
-  async function onSaveConsent() {
-    setConsentMsg(null);
-    setSavingConsent(true);
-    try {
-      const res = await api<{ enabled: boolean }>('/profile/ai-consent', {
-        method: 'PUT',
-        body: JSON.stringify({ enabled: aiExternalConsent })
-      });
-      setAiExternalConsent(!!res.enabled);
-      setConsentMsg({
-        tone: 'ok',
-        text: res.enabled
-          ? 'External AI consent enabled. Responses may use secure external processing.'
-          : 'External AI consent disabled. Responses will use built-in local guidance only.'
-      });
-    } catch (err: any) {
-      setConsentMsg({ tone: 'err', text: err?.message || 'Could not update AI consent.' });
-    } finally {
-      setSavingConsent(false);
-    }
-  }
 
   async function onSaveProfile(e: FormEvent) {
     e.preventDefault();
@@ -219,55 +191,6 @@ export default function StudentSettings() {
                 </button>
               </div>
             </form>
-
-            <section className="bg-white border border-cream-300 rounded-lg p-6 sm:p-8 space-y-4">
-              <div>
-                <h3 className="text-lg mb-1">External AI consent</h3>
-                <p className="text-sm text-ink-500">
-                  Control whether your CareerLinkAI chat can send your question plus profile context to an external AI provider.
-                  If this is off, replies stay on built-in local guidance.
-                </p>
-              </div>
-
-              <label className="flex items-start gap-3 text-sm">
-                <input
-                  type="checkbox"
-                  className="mt-1"
-                  checked={aiExternalConsent}
-                  onChange={e => {
-                    setAiExternalConsent(e.target.checked);
-                    if (consentMsg) setConsentMsg(null);
-                  }}
-                  disabled={loadingProfile || savingConsent}
-                />
-                <span>
-                  I consent to external AI processing for personalized counseling explanations.
-                </span>
-              </label>
-
-              {consentMsg && (
-                <div
-                  className={`text-sm rounded px-3 py-2 border ${
-                    consentMsg.tone === 'ok'
-                      ? 'bg-forest-50 border-forest-300 text-forest-700'
-                      : 'bg-terracotta-100 border-terracotta-400 text-terracotta-800'
-                  }`}
-                >
-                  {consentMsg.text}
-                </div>
-              )}
-
-              <div className="flex justify-end pt-3 border-t border-cream-300">
-                <button
-                  type="button"
-                  disabled={loadingProfile || savingConsent}
-                  onClick={onSaveConsent}
-                  className="btn btn-primary"
-                >
-                  {savingConsent ? 'Saving…' : 'Save AI consent'}
-                </button>
-              </div>
-            </section>
           </div>
         )}
 

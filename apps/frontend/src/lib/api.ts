@@ -2,7 +2,7 @@ const TOKEN_KEY = 'careerlinkai_token';
 const DEFAULT_PROD_API_BASE = 'https://careerlinkai.cejascarldindo.workers.dev';
 const DEFAULT_DEV_API_BASE = 'http://localhost:8787';
 const ENV_API_BASE = (import.meta.env.VITE_API_BASE || '').trim();
-const API_BASE = (
+export const API_BASE = (
   ENV_API_BASE || (import.meta.env.DEV ? DEFAULT_DEV_API_BASE : DEFAULT_PROD_API_BASE)
 ).replace(/\/$/, '');
 

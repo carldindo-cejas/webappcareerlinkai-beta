@@ -18,6 +18,7 @@ export type SignUpPayload = {
   role: 'student' | 'counselor';
   school?: string;
   inviteCode?: string;
+  acceptedPolicies: boolean;
 };
 
 type AuthCtx = {
@@ -76,6 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         lastName: payload.lastName,
         school: payload.school,
         inviteCode: payload.inviteCode,
+        acceptedPolicies: payload.acceptedPolicies,
         email: payload.email,
         password: payload.password,
         role: payload.role

@@ -1,5 +1,4 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import PortalLayout from '../components/PortalLayout';
 import { studentNavItems } from '../lib/portalNav';
 import { api } from '../lib/api';
@@ -50,16 +49,7 @@ function computeSubjectAverages(grades: ProfileForResults['grades']) {
 
 type ExplainResponse = {
   reply: string;
-  source: 'rule_based' | 'external_ai';
-  externalAi: {
-    consented: boolean;
-    configured: boolean;
-    used: boolean;
-  };
-};
-
-type AiConsentResponse = {
-  enabled: boolean;
+  source: 'rule_based' | 'ai';
 };
 
 export default function StudentResults() {
@@ -67,8 +57,7 @@ export default function StudentResults() {
   const [results, setResults] = useState<Results | null>(null);
   const [profile, setProfile] = useState<ProfileForResults | null>(null);
   const [loading, setLoading] = useState(true);
-  const [externalConsent, setExternalConsent] = useState(false);
-  const [lastSource, setLastSource] = useState<'rule_based' | 'external_ai' | null>(null);
+  const [lastSource, setLastSource] = useState<'rule_based' | 'ai' | null>(null);
   const [messages, setMessages] = useState<{ role: 'student' | 'ai'; text: string }[]>([
     { role: 'ai', text: 'Hi! Ask me why a course matched your profile or how to prepare for your top careers.' }
   ]);
@@ -83,10 +72,6 @@ export default function StudentResults() {
       setResults(res);
       setProfile(prof);
     }).finally(() => setLoading(false));
-
-    api<AiConsentResponse>('/profile/ai-consent')
-      .then(res => setExternalConsent(!!res.enabled))
-      .catch(() => setExternalConsent(false));
   }, []);
 
   const subjectAverages = useMemo(() => computeSubjectAverages(profile?.grades), [profile]);
@@ -109,7 +94,6 @@ export default function StudentResults() {
       });
       setMessages(prev => [...prev, { role: 'ai', text: reply.reply }]);
       setLastSource(reply.source);
-      setExternalConsent(!!reply.externalAi?.consented);
     } catch (err: any) {
       setMessages(prev => [...prev, { role: 'ai', text: err.message || 'I could not answer that right now. Please try again.' }]);
     } finally {
@@ -260,19 +244,10 @@ export default function StudentResults() {
           <aside className="bg-white border border-cream-300 rounded-lg h-[620px] flex flex-col">
             <div className="p-4 border-b border-cream-300">
               <div className="font-medium">Ask CareerLinkAI</div>
-              <div className="text-sm text-ink-500">Result-aware explanations</div>
-              <div className="mt-2 text-xs font-mono uppercase tracking-wide text-ink-500">
-                External AI consent: {externalConsent ? 'ON' : 'OFF'}
-              </div>
-              {!externalConsent && (
-                <div className="mt-1 text-xs text-ink-500">
-                  External AI is off. Replies use built-in local guidance.{' '}
-                  <Link to="/portal/student/settings" className="text-forest-700 hover:underline">Enable in settings</Link>.
-                </div>
-              )}
+              <div className="text-sm text-ink-500">Result-aware explanations, powered by Cloudflare Workers AI</div>
               {lastSource && (
                 <div className="mt-1 text-xs text-ink-500">
-                  Last reply source: {lastSource === 'external_ai' ? 'External AI' : 'Built-in local guidance'}
+                  Last reply source: {lastSource === 'ai' ? 'Workers AI (Llama 3)' : 'Built-in local guidance'}
                 </div>
               )}
             </div>

@@ -2,6 +2,8 @@ import { ReactNode, useState } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import Logo from './Logo';
 import { useAuth } from '../lib/auth';
+import { NotificationProvider } from '../lib/NotificationContext';
+import NotificationBell from './NotificationBell';
 
 type PortalNavItem = {
   label: string;
@@ -103,6 +105,7 @@ export default function PortalLayout({
         : null;
 
   return (
+    <NotificationProvider>
     <div className="min-h-screen bg-cream-100 flex">
       <aside
         className={`fixed z-40 inset-y-0 left-0 bg-forest-700 text-cream-50 transition-all duration-200 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 ${collapsed ? 'md:w-20' : 'md:w-64'} w-72`}
@@ -224,12 +227,16 @@ export default function PortalLayout({
                 {subtitle && <p className="text-sm text-ink-500 truncate">{subtitle}</p>}
               </div>
             </div>
-            <div>{rightHeader}</div>
+            <div className="flex items-center gap-2">
+              <NotificationBell />
+              {rightHeader && <div>{rightHeader}</div>}
+            </div>
           </div>
         </header>
 
         <main className="p-4 sm:p-8">{children}</main>
       </div>
     </div>
+    </NotificationProvider>
   );
 }

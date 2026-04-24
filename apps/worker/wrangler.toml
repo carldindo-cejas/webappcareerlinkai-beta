@@ -13,10 +13,31 @@ binding = "DB"
 database_name = "webappcareerlinkai-beta"
 database_id = "a9b922e5-0e01-4038-80a7-0f97f05a5c38"
 
+[durable_objects]
+bindings = [{ name = "NOTIFICATIONS", class_name = "NotificationDO" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NotificationDO"]
+
 [vars]
 # For local dev only. In production use `wrangler secret put JWT_SECRET`.
 JWT_SECRET = "dev-secret-change-me-to-a-long-random-string"
 FRONTEND_ORIGIN = "https://careerlinkai.cejascarldindo.workers.dev"
+# Cloudflare AI Gateway slug — create once via `wrangler ai-gateway create careerlinkai-ai`.
+AI_GATEWAY_ID = "careerlinkai-beta-ai-gateway"
+
+[ai]
+binding = "AI"
+
+# Vectorize index for RAG knowledge base.
+# Create once: wrangler vectorize create careerlinkai-knowledge --dimensions=768 --metric=cosine
+[[vectorize]]
+binding = "KNOWLEDGE"
+index_name = "careerlinkai-knowledge"
+
+[triggers]
+crons = ["0 2 * * *"]
 
 [assets]
 directory = "../frontend/dist"

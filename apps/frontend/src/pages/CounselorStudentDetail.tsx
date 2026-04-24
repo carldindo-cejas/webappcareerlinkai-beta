@@ -11,8 +11,6 @@ type StudentResultsPayload = {
     strand: string | null;
     gwa: number | null;
     grades: Record<string, any> | null;
-    aiExternalConsent: boolean;
-    aiExternalConsentAt: number | null;
   } | null;
   results: {
     generatedAt: number;
@@ -53,7 +51,7 @@ export default function CounselorStudentDetail() {
           <span className="eyebrow block mb-2">Student profile</span>
           <h1 className="text-4xl sm:text-5xl mb-3">{data.student.name}</h1>
           <p className="text-ink-500">{data.student.email}</p>
-          <div className="grid sm:grid-cols-4 gap-4 mt-6">
+          <div className="grid sm:grid-cols-3 gap-4 mt-6">
             <div className="bg-cream-50 border border-cream-300 rounded-lg p-4">
               <div className="font-mono text-[11px] tracking-[0.12em] uppercase text-ink-300 mb-1">Strand</div>
               <div className="font-medium text-forest-700">{data.profile?.strand ?? '—'}</div>
@@ -65,31 +63,6 @@ export default function CounselorStudentDetail() {
             <div className="bg-cream-50 border border-cream-300 rounded-lg p-4">
               <div className="font-mono text-[11px] tracking-[0.12em] uppercase text-ink-300 mb-1">Result status</div>
               <div className="font-medium text-forest-700">{data.results ? 'Complete' : 'Pending'}</div>
-            </div>
-            <div className="bg-cream-50 border border-cream-300 rounded-lg p-4">
-              <div className="font-mono text-[11px] tracking-[0.12em] uppercase text-ink-300 mb-1 flex items-center gap-1.5">
-                <span>External AI consent</span>
-                <span
-                  className="inline-flex items-center justify-center w-4 h-4 rounded-full border border-cream-400 text-[10px] text-ink-500 cursor-help normal-case"
-                  title="Enabled: external AI explanations may be used. Disabled: external AI is blocked and only local guidance is used."
-                  aria-label="External AI consent legend"
-                >
-                  ?
-                </span>
-              </div>
-              <div className={`font-medium ${data.profile?.aiExternalConsent ? 'text-forest-700' : 'text-ink-500'}`}>
-                {data.profile?.aiExternalConsent ? 'Enabled' : 'Disabled'}
-              </div>
-              <div className="text-[11px] text-ink-500 mt-1">
-                {data.profile?.aiExternalConsent
-                  ? 'Legend: External AI may be used for explanations.'
-                  : 'Legend: External AI is blocked; only local guidance is used.'}
-              </div>
-              <div className="text-xs text-ink-500 mt-1">
-                {data.profile?.aiExternalConsentAt
-                  ? `Updated ${new Date(data.profile.aiExternalConsentAt * 1000).toLocaleDateString()}`
-                  : 'No recorded consent timestamp'}
-              </div>
             </div>
           </div>
         </section>

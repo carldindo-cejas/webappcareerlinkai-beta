@@ -4,6 +4,7 @@ import { studentNavItems } from '../lib/portalNav';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import MiniCalendar, { CalendarEvent } from '../components/charts/MiniCalendar';
+import { useNotifications } from '../lib/NotificationContext';
 
 type Invitation = {
   id: number;
@@ -26,6 +27,7 @@ function formatDateTime(epochSeconds: number) {
 
 export default function StudentActivity() {
   const { user } = useAuth();
+  const { lastNotification } = useNotifications();
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -45,6 +47,12 @@ export default function StudentActivity() {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    if (lastNotification?.kind === 'seminar_invite') {
+      load();
+    }
+  }, [lastNotification]);
 
   async function respondInvite(id: number, status: 'accepted' | 'declined') {
     setBusyId(id);

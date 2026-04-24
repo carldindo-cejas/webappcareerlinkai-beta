@@ -3,13 +3,18 @@ import { cors } from 'hono/cors';
 import { hashPassword, randomJoinCode, signToken, verifyPassword, verifyToken } from './auth';
 import { hollandCode, scoreRiasec, scoreScct } from './scoring';
 import { predictFromDatasetMl } from './ml/predictor';
+import { retrieveContext, runLlama, type ChatMessage, type RetrievedDoc } from './ai';
+import { seedKnowledge, SCCT_QUESTIONS } from './knowledge';
 
 type Bindings = {
   DB: D1Database;
   ASSETS: Fetcher;
   JWT_SECRET: string;
   FRONTEND_ORIGIN: string;
-  OPENAI_API_KEY?: string;
+  AI: Ai;
+  KNOWLEDGE: VectorizeIndex;
+  AI_GATEWAY_ID: string;
+  NOTIFICATIONS: DurableObjectNamespace;
 };
 
 type Variables = {
@@ -25,6 +30,7 @@ const REQUIRED_SCCT_COUNT = 12;
 const SUBJECT_KEYS = ['Math', 'English', 'Science'] as const;
 const GRADE_LEVELS = ['7', '8', '9', '10'] as const;
 const JOIN_CODE_REGEX = /^[A-HJ-NP-Z2-9]{6}$/;
+const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 const API_ROUTE_PREFIXES = [
   '/health',
   '/auth',
@@ -34,7 +40,9 @@ const API_ROUTE_PREFIXES = [
   '/ai',
   '/counselor',
   '/join',
-  '/student'
+  '/student',
+  '/notifications',
+  '/ws'
 ] as const;
 
 const PROFILE_SCHEMA_COLUMNS = [
@@ -54,6 +62,26 @@ const PROFILE_SCHEMA_COLUMNS = [
 
 let ensureProfilesSchemaPromise: Promise<void> | null = null;
 let ensureSeminarsSchemaPromise: Promise<void> | null = null;
+let ensureNotificationsSchemaPromise: Promise<void> | null = null;
+let ensureAiChatSchemaPromise: Promise<void> | null = null;
+let vectorizeReady = false;
+
+async function ensureVectorizeSeed(env: Bindings): Promise<void> {
+  if (vectorizeReady) return;
+  try {
+    const row = await env.DB.prepare('SELECT value FROM system_config WHERE key = ?')
+      .bind('vectorize_seeded').first<{ value: string }>();
+    if (row?.value === '1') { vectorizeReady = true; return; }
+  } catch { /* system_config may not exist yet */ }
+  const result = await seedKnowledge(env);
+  if (result.upserted > 0 && result.failedBatches === 0) {
+    vectorizeReady = true;
+    await env.DB.prepare(
+      `INSERT INTO system_config (key, value, updated_at) VALUES (?, ?, unixepoch())
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    ).bind('vectorize_seeded', '1').run().catch(() => {});
+  }
+}
 
 async function ensureSeminarsSchema(db: D1Database): Promise<void> {
   if (ensureSeminarsSchemaPromise) return ensureSeminarsSchemaPromise;
@@ -68,6 +96,77 @@ async function ensureSeminarsSchema(db: D1Database): Promise<void> {
     throw err;
   });
   return ensureSeminarsSchemaPromise;
+}
+
+async function ensureNotificationsSchema(db: D1Database): Promise<void> {
+  if (ensureNotificationsSchemaPromise) return ensureNotificationsSchemaPromise;
+  ensureNotificationsSchemaPromise = (async () => {
+    await db.prepare(
+      `CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        read INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`
+    ).run();
+    await db.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC)`
+    ).run();
+  })().catch(err => {
+    ensureNotificationsSchemaPromise = null;
+    throw err;
+  });
+  return ensureNotificationsSchemaPromise;
+}
+
+async function ensureAiChatSchema(db: D1Database): Promise<void> {
+  if (ensureAiChatSchemaPromise) return ensureAiChatSchemaPromise;
+  ensureAiChatSchemaPromise = (async () => {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS system_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`).run();
+    await db.prepare(`CREATE TABLE IF NOT EXISTS ai_chat_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL DEFAULT 'New conversation',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_ai_sessions_student ON ai_chat_sessions(student_id, updated_at DESC)`).run();
+    await db.prepare(`CREATE TABLE IF NOT EXISTS ai_chat_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES ai_chat_sessions(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+      content TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_ai_messages_session ON ai_chat_messages(session_id, created_at ASC)`).run();
+  })().catch(err => {
+    ensureAiChatSchemaPromise = null;
+    throw err;
+  });
+  return ensureAiChatSchemaPromise;
+}
+
+async function pushNotification(
+  env: Bindings,
+  userId: number,
+  payload: { id: number; kind: string; title: string; body: string; createdAt: number }
+): Promise<void> {
+  try {
+    const stub = env.NOTIFICATIONS.get(env.NOTIFICATIONS.idFromName(String(userId)));
+    await stub.fetch(new Request('https://do/push', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }));
+  } catch {
+    // notification already persisted in DB; ignore push failure
+  }
 }
 
 async function ensureProfilesSchema(db: D1Database): Promise<void> {
@@ -144,6 +243,10 @@ function normalizeJoinCode(value: unknown): string {
 
 function isValidJoinCode(code: string): boolean {
   return JOIN_CODE_REGEX.test(code);
+}
+
+function isStrongPassword(password: string): boolean {
+  return STRONG_PASSWORD_REGEX.test(password);
 }
 
 function readSubjectAlias(source: Record<string, any>, subject: string): unknown {
@@ -246,49 +349,146 @@ function buildRuleBasedAiReply(question: string, context: {
   return `Based on your results, ${context.topCourse} and ${context.topCareer} are strong paths for your ${context.hollandCode} profile. Ask me about study plan, skill roadmap, or day-to-day work in either path.`;
 }
 
-async function getExternalAiReply(apiKey: string, question: string, context: {
-  hollandCode: string;
-  topCourse: string;
-  topCareer: string;
-  strand: string | null;
-  scct: Record<string, number>;
-}): Promise<string | null> {
-  const prompt = [
+const KNOWLEDGE_TARGET_TOP_K = 6;
+const KNOWLEDGE_MIN_SCORE = 0.65;
+const KNOWLEDGE_MIN_CONFIDENT_DOCS = 2;
+
+function isScctInterpretationQuestion(question: string): boolean {
+  const q = question.toLowerCase();
+  const mentionsScct = q.includes('scct')
+    || q.includes('self-efficacy')
+    || q.includes('self efficacy')
+    || q.includes('outcome expectation')
+    || q.includes('perceived barrier');
+  const asksInterpretation = q.includes('score') || q.includes('interpret') || q.includes('meaning');
+  return mentionsScct || (asksInterpretation && (q.includes('self') || q.includes('outcome') || q.includes('barrier')));
+}
+
+function formatScctQuestionReferenceBlock(): string {
+  return '\nSCCT questionnaire reference (12 items):\n' +
+    SCCT_QUESTIONS.map(q => `Q${q.id} [${q.construct}]: ${q.prompt}`).join('\n');
+}
+
+function selectGroundedKnowledge(retrieved: RetrievedDoc[]): RetrievedDoc[] {
+  if (!retrieved.length) return [];
+  const confident = retrieved.filter(r => Number.isFinite(r.score) && r.score >= KNOWLEDGE_MIN_SCORE);
+  if (confident.length >= KNOWLEDGE_MIN_CONFIDENT_DOCS) return confident.slice(0, 4);
+  const topScore = retrieved[0]?.score ?? 0;
+  if (topScore >= KNOWLEDGE_MIN_SCORE + 0.1) return retrieved.slice(0, 1);
+  return [];
+}
+
+function hasSourceUrls(docs: RetrievedDoc[]): boolean {
+  return docs.some(d => typeof d.sourceUrl === 'string' && d.sourceUrl.length > 0);
+}
+
+function formatKnowledgeBlock(docs: RetrievedDoc[]): string {
+  if (!docs.length) return '';
+  return '\nReference notes from CareerLinkAI knowledge base:\n' +
+    docs.map((d, i) => `(${i + 1}) ${d.text}${d.sourceUrl ? ` [source: ${d.sourceUrl}]` : ''}`).join('\n');
+}
+
+async function getExplainAiReply(
+  env: Bindings,
+  question: string,
+  context: {
+    hollandCode: string;
+    topCourse: string;
+    topCareer: string;
+    strand: string | null;
+    scct: Record<string, number>;
+  }
+): Promise<string | null> {
+  const retrieved = await retrieveContext(env, question, KNOWLEDGE_TARGET_TOP_K);
+  const groundedDocs = selectGroundedKnowledge(retrieved);
+  if (!groundedDocs.length) return null;
+
+  const knowledge = formatKnowledgeBlock(groundedDocs);
+  const scctQuestionReference = isScctInterpretationQuestion(question)
+    ? formatScctQuestionReferenceBlock()
+    : '';
+  const sourceCitationInstruction = hasSourceUrls(groundedDocs)
+    ? 'If you use facts from a referenced source URL, include a final line "Sources:" with only the URLs you used.'
+    : '';
+
+  const systemPrompt = [
     'You are a career counselor assistant for senior high school students in the Philippines.',
     'Explain recommendations in plain, encouraging language, no markdown, and keep it under 180 words.',
+    'Ground factual claims strictly on the reference notes below. If references do not support a claim, say you are unsure instead of guessing.',
+    sourceCitationInstruction,
+    scctQuestionReference ? 'When discussing SCCT score interpretation, explicitly anchor your explanation to the SCCT questionnaire items below.' : '',
     `Student Holland code: ${context.hollandCode}`,
     `Top course: ${context.topCourse}`,
     `Top career: ${context.topCareer}`,
     `Current strand: ${context.strand ?? 'N/A'}`,
     `SCCT: self-efficacy=${(context.scct.self_efficacy ?? 3).toFixed(1)}, outcome expectations=${(context.scct.outcome_expectations ?? 3).toFixed(1)}, perceived barriers=${(context.scct.perceived_barriers ?? 3).toFixed(1)}`,
-    `Question: ${question}`
-  ].join('\n');
+    knowledge,
+    scctQuestionReference
+  ].filter(Boolean).join('\n');
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
-  try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        temperature: 0.5,
-        messages: [{ role: 'user', content: prompt }]
-      }),
-      signal: controller.signal
-    });
+  return runLlama(
+    env,
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: question }
+    ],
+    { temperature: 0.5, maxTokens: 360 }
+  );
+}
 
-    if (!res.ok) return null;
-    const body = await res.json<any>();
-    const content = body?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string' || !content.trim()) return null;
-    return content.trim();
-  } finally {
-    clearTimeout(timeout);
-  }
+async function getCounselorAiReply(
+  env: Bindings,
+  context: { hollandCode?: string; topCourse?: string; topCareer?: string; strand?: string | null },
+  history: Array<{ role: string; content: string }>,
+  question: string
+): Promise<string | null> {
+  const ctxLines = [
+    context.hollandCode && `Student Holland code: ${context.hollandCode}`,
+    context.topCourse && `Top recommended course: ${context.topCourse}`,
+    context.topCareer && `Top recommended career: ${context.topCareer}`,
+    context.strand && `Current strand: ${context.strand}`,
+  ].filter(Boolean).join('\n');
+
+  const retrieved = await retrieveContext(env, question, KNOWLEDGE_TARGET_TOP_K);
+  const groundedDocs = selectGroundedKnowledge(retrieved);
+  if (!groundedDocs.length) return null;
+
+  const knowledge = formatKnowledgeBlock(groundedDocs);
+  const scctQuestionReference = isScctInterpretationQuestion(question)
+    ? formatScctQuestionReferenceBlock()
+    : '';
+  const sourceCitationInstruction = hasSourceUrls(groundedDocs)
+    ? 'If you use facts from a referenced source URL, include a final line "Sources:" with up to 3 URLs you used.'
+    : '';
+
+  const systemPrompt = [
+    'You are a career counseling assistant for senior high school students in the Philippines.',
+    'You ONLY answer questions about: academic strand choices (STEM, ABM, HUMSS, TVL/ICT), college courses,',
+    'Holland/RIASEC personality types, SCCT (Social Cognitive Career Theory), career path planning,',
+    'Philippine universities and colleges, study habits, and professional development for Filipino students.',
+    'If asked anything outside these topics, politely decline and redirect to career or academic guidance.',
+    'Ground factual claims strictly on the reference notes below. If references do not support a claim, ask for clarification instead of guessing.',
+    sourceCitationInstruction,
+    scctQuestionReference ? 'When discussing SCCT score interpretation, explicitly anchor your explanation to the SCCT questionnaire items below.' : '',
+    'Format responses clearly using simple Markdown-style structure.',
+    'Use short paragraphs and use bullet points (-) or numbered steps (1.) when listing recommendations.',
+    'Highlight key advice with **bold** text.',
+    'Keep responses encouraging and under 220 words.',
+    ctxLines ? `\nStudent profile:\n${ctxLines}` : '',
+    knowledge,
+    scctQuestionReference
+  ].filter(Boolean).join('\n');
+
+  const msgs: ChatMessage[] = [
+    { role: 'system', content: systemPrompt },
+    ...history.slice(-10).map(h => ({
+      role: (h.role === 'assistant' ? 'assistant' : 'user') as 'assistant' | 'user',
+      content: h.content
+    })),
+    { role: 'user', content: question },
+  ];
+
+  return runLlama(env, msgs, { temperature: 0.6, maxTokens: 400 });
 }
 
 app.use('*', (c, next) => {
@@ -332,6 +532,7 @@ app.post('/auth/signup', async c => {
     lastName?: string;
     school?: string;
     inviteCode?: string;
+    acceptedPolicies?: boolean;
     email: string;
     password: string;
     role: 'student' | 'counselor';
@@ -345,6 +546,12 @@ app.post('/auth/signup', async c => {
   if (!body.email || !body.password) return c.json({ error: 'Missing fields' }, 400);
   if (!combinedName) return c.json({ error: 'Name is required.' }, 400);
   if (body.password.length < 8) return c.json({ error: 'Password must be at least 8 characters.' }, 400);
+  if (!isStrongPassword(body.password)) {
+    return c.json({ error: 'Password must include uppercase, lowercase, number, and special character.' }, 400);
+  }
+  if (body.acceptedPolicies !== true) {
+    return c.json({ error: 'You must agree to the Terms and Privacy Policy.' }, 400);
+  }
   if (!['student', 'counselor'].includes(body.role)) return c.json({ error: 'Invalid role' }, 400);
   if (body.role === 'counselor') {
     if (!firstName || !lastName) return c.json({ error: 'First and last name are required.' }, 400);
@@ -469,7 +676,7 @@ app.get('/profile', auth, requireRole('student'), async c => {
   await ensureProfilesSchema(c.env.DB);
   const p = await c.env.DB.prepare(
     `SELECT strand, gwa, grades_json, school, grade_level, gender, birthdate,
-            contact_number, guardian_name, ai_external_consent, ai_external_consent_at, basics_completed
+            contact_number, guardian_name, basics_completed
      FROM profiles WHERE user_id = ?`
   ).bind(id).first<any>();
   if (!p) return c.json({});
@@ -483,52 +690,7 @@ app.get('/profile', auth, requireRole('student'), async c => {
     birthdate: p.birthdate ?? null,
     contactNumber: p.contact_number ?? null,
     guardianName: p.guardian_name ?? null,
-    aiExternalConsent: !!p.ai_external_consent,
-    aiExternalConsentAt: p.ai_external_consent_at ?? null,
     basicsCompleted: !!p.basics_completed
-  });
-});
-
-app.get('/profile/ai-consent', auth, requireRole('student'), async c => {
-  const id = c.get('userId');
-  await ensureProfilesSchema(c.env.DB);
-  const row = await c.env.DB.prepare(
-    'SELECT ai_external_consent, ai_external_consent_at FROM profiles WHERE user_id = ?'
-  ).bind(id).first<{ ai_external_consent?: number; ai_external_consent_at?: number | null }>();
-
-  return c.json({
-    enabled: !!row?.ai_external_consent,
-    updatedAt: row?.ai_external_consent_at ?? null
-  });
-});
-
-app.put('/profile/ai-consent', auth, requireRole('student'), async c => {
-  const id = c.get('userId');
-  await ensureProfilesSchema(c.env.DB);
-
-  const body = await c.req.json<{ enabled?: boolean }>();
-  if (typeof body.enabled !== 'boolean') {
-    return c.json({ error: 'enabled must be true or false.' }, 400);
-  }
-
-  const enabled = body.enabled ? 1 : 0;
-  await c.env.DB.prepare(
-    `INSERT INTO profiles (user_id, ai_external_consent, ai_external_consent_at, updated_at)
-     VALUES (?, ?, CASE WHEN ? = 1 THEN unixepoch() ELSE NULL END, unixepoch())
-     ON CONFLICT(user_id) DO UPDATE SET
-       ai_external_consent=excluded.ai_external_consent,
-       ai_external_consent_at=excluded.ai_external_consent_at,
-       updated_at=unixepoch()`
-  ).bind(id, enabled, enabled).run();
-
-  const current = await c.env.DB.prepare(
-    'SELECT ai_external_consent, ai_external_consent_at FROM profiles WHERE user_id = ?'
-  ).bind(id).first<{ ai_external_consent: number; ai_external_consent_at: number | null }>();
-
-  return c.json({
-    ok: true,
-    enabled: !!current?.ai_external_consent,
-    updatedAt: current?.ai_external_consent_at ?? null
   });
 });
 
@@ -759,8 +921,8 @@ app.post('/ai/explain', auth, requireRole('student'), async c => {
       'SELECT holland_code, courses_json, careers_json, scct_json FROM results WHERE user_id = ?'
     ).bind(userId).first<{ holland_code: string; courses_json: string; careers_json: string; scct_json: string }>(),
     c.env.DB.prepare(
-      'SELECT strand, ai_external_consent FROM profiles WHERE user_id = ?'
-    ).bind(userId).first<{ strand?: string; ai_external_consent?: number }>()
+      'SELECT strand FROM profiles WHERE user_id = ?'
+    ).bind(userId).first<{ strand?: string }>()
   ]);
 
   if (!result) return c.json({ error: 'Generate your results first before using AI explanation.' }, 400);
@@ -777,31 +939,156 @@ app.post('/ai/explain', auth, requireRole('student'), async c => {
   };
 
   let reply = buildRuleBasedAiReply(question, context);
-  let source: 'rule_based' | 'external_ai' = 'rule_based';
-  const externalConsent = !!profile?.ai_external_consent;
+  let source: 'rule_based' | 'ai' = 'rule_based';
 
-  const apiKey = c.env.OPENAI_API_KEY;
-  if (apiKey && externalConsent) {
-    try {
-      const external = await getExternalAiReply(apiKey, question, context);
-      if (external) {
-        reply = external;
-        source = 'external_ai';
-      }
-    } catch (e) {
-      console.warn('External AI call failed, using fallback.', e);
+  await ensureAiChatSchema(c.env.DB);
+  c.executionCtx.waitUntil(ensureVectorizeSeed(c.env));
+  try {
+    const aiReply = await getExplainAiReply(c.env, question, context);
+    if (aiReply) {
+      reply = aiReply;
+      source = 'ai';
     }
+  } catch (e) {
+    console.warn('Workers AI call failed, using fallback.', e);
   }
 
-  return c.json({
-    reply,
-    source,
-    externalAi: {
-      consented: externalConsent,
-      configured: !!apiKey,
-      used: source === 'external_ai'
-    }
-  });
+  return c.json({ reply, source });
+});
+
+// -------- AI Counselor sessions (student) --------
+app.get('/ai/sessions', auth, requireRole('student'), async c => {
+  const userId = c.get('userId');
+  await ensureAiChatSchema(c.env.DB);
+  const rs = await c.env.DB.prepare(`
+    SELECT s.id, s.title, s.created_at AS createdAt, s.updated_at AS updatedAt,
+      (SELECT COUNT(*) FROM ai_chat_messages m WHERE m.session_id = s.id) AS messageCount
+    FROM ai_chat_sessions s
+    WHERE s.student_id = ?
+    ORDER BY s.updated_at DESC
+    LIMIT 30
+  `).bind(userId).all<any>();
+  return c.json(rs.results ?? []);
+});
+
+app.post('/ai/sessions', auth, requireRole('student'), async c => {
+  const userId = c.get('userId');
+  await ensureAiChatSchema(c.env.DB);
+  const row = await c.env.DB.prepare(
+    `INSERT INTO ai_chat_sessions (student_id) VALUES (?) RETURNING id, title, created_at AS createdAt, updated_at AS updatedAt`
+  ).bind(userId).first<{ id: number; title: string; createdAt: number; updatedAt: number }>();
+  return c.json(row);
+});
+
+app.delete('/ai/sessions/:id', auth, requireRole('student'), async c => {
+  const userId = c.get('userId');
+  const sessionId = parseInt(c.req.param('id'), 10);
+  if (!Number.isFinite(sessionId)) return c.json({ error: 'Invalid session id.' }, 400);
+  await ensureAiChatSchema(c.env.DB);
+  const session = await c.env.DB.prepare(
+    'SELECT id FROM ai_chat_sessions WHERE id = ? AND student_id = ?'
+  ).bind(sessionId, userId).first();
+  if (!session) return c.json({ error: 'Not found.' }, 404);
+  await c.env.DB.prepare('DELETE FROM ai_chat_sessions WHERE id = ?').bind(sessionId).run();
+  return c.json({ ok: true });
+});
+
+app.get('/ai/sessions/:id/messages', auth, requireRole('student'), async c => {
+  const userId = c.get('userId');
+  const sessionId = parseInt(c.req.param('id'), 10);
+  if (!Number.isFinite(sessionId)) return c.json({ error: 'Invalid session id.' }, 400);
+  await ensureAiChatSchema(c.env.DB);
+  const session = await c.env.DB.prepare(
+    'SELECT id FROM ai_chat_sessions WHERE id = ? AND student_id = ?'
+  ).bind(sessionId, userId).first();
+  if (!session) return c.json({ error: 'Not found.' }, 404);
+  const rs = await c.env.DB.prepare(
+    'SELECT id, role, content, created_at AS createdAt FROM ai_chat_messages WHERE session_id = ? ORDER BY created_at ASC'
+  ).bind(sessionId).all<any>();
+  return c.json(rs.results ?? []);
+});
+
+app.post('/ai/sessions/:id/chat', auth, requireRole('student'), async c => {
+  const userId = c.get('userId');
+  const sessionId = parseInt(c.req.param('id'), 10);
+  if (!Number.isFinite(sessionId)) return c.json({ error: 'Invalid session id.' }, 400);
+  await ensureAiChatSchema(c.env.DB);
+
+  const session = await c.env.DB.prepare(
+    'SELECT id, title FROM ai_chat_sessions WHERE id = ? AND student_id = ?'
+  ).bind(sessionId, userId).first<{ id: number; title: string }>();
+  if (!session) return c.json({ error: 'Not found.' }, 404);
+
+  const body = await c.req.json<{ message?: string }>();
+  const message = (body.message || '').trim();
+  if (!message) return c.json({ error: 'Message is required.' }, 400);
+  if (message.length > 2000) return c.json({ error: 'Message is too long.' }, 400);
+
+  await c.env.DB.prepare(
+    'INSERT INTO ai_chat_messages (session_id, role, content) VALUES (?, ?, ?)'
+  ).bind(sessionId, 'user', message).run();
+
+  if (session.title === 'New conversation') {
+    const newTitle = message.slice(0, 60) + (message.length > 60 ? '…' : '');
+    await c.env.DB.prepare(
+      'UPDATE ai_chat_sessions SET title = ?, updated_at = unixepoch() WHERE id = ?'
+    ).bind(newTitle, sessionId).run();
+  } else {
+    await c.env.DB.prepare(
+      'UPDATE ai_chat_sessions SET updated_at = unixepoch() WHERE id = ?'
+    ).bind(sessionId).run();
+  }
+
+  const historyRs = await c.env.DB.prepare(
+    'SELECT role, content FROM ai_chat_messages WHERE session_id = ? ORDER BY created_at DESC LIMIT 11'
+  ).bind(sessionId).all<{ role: string; content: string }>();
+  const history = (historyRs.results ?? []).reverse().slice(0, -1);
+
+  const [result, profile] = await Promise.all([
+    c.env.DB.prepare(
+      'SELECT holland_code, courses_json, careers_json FROM results WHERE user_id = ?'
+    ).bind(userId).first<{ holland_code: string; courses_json: string; careers_json: string }>().catch(() => null),
+    c.env.DB.prepare('SELECT strand FROM profiles WHERE user_id = ?')
+      .bind(userId).first<{ strand?: string }>().catch(() => null),
+  ]);
+
+  const ctx: { hollandCode?: string; topCourse?: string; topCareer?: string; strand?: string | null } = {};
+  if (result) {
+    ctx.hollandCode = result.holland_code;
+    try { ctx.topCourse = (JSON.parse(result.courses_json) as any[])[0]?.name; } catch { /* ignore */ }
+    try { ctx.topCareer = (JSON.parse(result.careers_json) as any[])[0]?.name; } catch { /* ignore */ }
+  }
+  if (profile) ctx.strand = profile.strand;
+
+  c.executionCtx.waitUntil(ensureVectorizeSeed(c.env));
+  let reply: string;
+  let source: 'ai' | 'fallback' = 'fallback';
+
+  const aiReply = await getCounselorAiReply(c.env, ctx, history, message).catch(() => null);
+  if (aiReply) {
+    reply = aiReply;
+    source = 'ai';
+  } else {
+    reply = 'I want to keep this accurate, but I do not have enough matching reference knowledge for that question yet. Try asking about your RIASEC, SCCT interpretation, strand fit, course options, or career steps.';
+  }
+
+  await c.env.DB.prepare(
+    'INSERT INTO ai_chat_messages (session_id, role, content) VALUES (?, ?, ?)'
+  ).bind(sessionId, 'assistant', reply).run();
+
+  const updatedTitle = session.title === 'New conversation'
+    ? message.slice(0, 60) + (message.length > 60 ? '…' : '')
+    : session.title;
+
+  return c.json({ reply, source, sessionTitle: updatedTitle });
+});
+
+// -------- Admin: seed the Vectorize knowledge base --------
+app.post('/admin/seed-knowledge', auth, requireRole('counselor'), async c => {
+  const body = await c.req.json<{ urls?: string[] }>().catch(() => null);
+  const sourceUrls = Array.isArray(body?.urls) ? body.urls : [];
+  const result = await seedKnowledge(c.env, sourceUrls);
+  return c.json({ ok: result.failedBatches === 0, ...result });
 });
 
 // -------- Counselor --------
@@ -976,12 +1263,33 @@ app.post('/counselor/departments/:id/seminars', auth, requireRole('counselor'), 
     'SELECT student_id FROM department_members WHERE department_id = ?'
   ).bind(deptId).all<{ student_id: number }>();
 
+  await ensureNotificationsSchema(c.env.DB);
+
+  const scheduledDate = new Date(scheduledAt * 1000).toLocaleDateString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric'
+  });
+
   let inviteCount = 0;
   for (const row of members.results ?? []) {
     await c.env.DB.prepare(
       `INSERT OR IGNORE INTO seminar_invites (seminar_id, department_id, student_id, status, created_at)
        VALUES (?, ?, ?, 'pending', unixepoch())`
     ).bind(seminar.id, deptId, row.student_id).run();
+
+    const notifBody = `You have been invited to "${title}" on ${scheduledDate}${venue ? ` at ${venue}` : ''}.`;
+    const notifRow = await c.env.DB.prepare(
+      `INSERT INTO notifications (user_id, kind, title, body) VALUES (?, 'seminar_invite', ?, ?) RETURNING id, created_at`
+    ).bind(row.student_id, `New event: ${title}`, notifBody).first<{ id: number; created_at: number }>();
+    if (notifRow) {
+      await pushNotification(c.env, row.student_id, {
+        id: notifRow.id,
+        kind: 'seminar_invite',
+        title: `New event: ${title}`,
+        body: notifBody,
+        createdAt: notifRow.created_at,
+      });
+    }
+
     inviteCount++;
   }
 
@@ -998,6 +1306,65 @@ app.post('/counselor/departments/:id/seminars', auth, requireRole('counselor'), 
     accepted: 0,
     declined: 0,
     pending: inviteCount
+  });
+});
+
+app.post('/counselor/events/ai-draft', auth, requireRole('counselor'), async c => {
+  const body = await c.req.json<{ prompt?: string }>().catch(() => ({} as { prompt?: string }));
+  const prompt = (body.prompt || '').trim();
+  if (!prompt) return c.json({ error: 'Prompt is required.' }, 400);
+  if (prompt.length > 1000) return c.json({ error: 'Prompt too long.' }, 400);
+
+  const nowIso = new Date().toISOString();
+  const systemPrompt = [
+    'You are an assistant that drafts school career-counseling events.',
+    `The current date and time is ${nowIso}. Resolve relative dates (e.g. "next Friday 2pm") against this.`,
+    'Output STRICT JSON ONLY — no prose, no code fences — with exactly these keys:',
+    '  "title" (string, 4-80 chars, concise event name),',
+    '  "description" (string, 1-2 sentences describing the event),',
+    '  "venue" (string, short venue name; if unspecified, use "TBA"),',
+    '  "scheduledAt" (string, ISO-8601 timestamp in the future).',
+    'If the user prompt is missing a schedule, pick a reasonable business-hours slot within the next two weeks.',
+    'Do not include any keys other than those four. Do not wrap in markdown.'
+  ].join('\n');
+
+  const raw = await runLlama(
+    c.env,
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: prompt }
+    ],
+    { temperature: 0.4, maxTokens: 300 }
+  );
+
+  if (!raw) return c.json({ error: 'AI service is unavailable. Please try again.' }, 502);
+
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return c.json({ error: 'AI response could not be parsed.' }, 502);
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch {
+    return c.json({ error: 'AI response was not valid JSON.' }, 502);
+  }
+
+  const title = typeof parsed?.title === 'string' ? parsed.title.trim() : '';
+  const description = typeof parsed?.description === 'string' ? parsed.description.trim() : '';
+  const venue = typeof parsed?.venue === 'string' ? parsed.venue.trim() : '';
+  const scheduledAtRaw = typeof parsed?.scheduledAt === 'string' ? parsed.scheduledAt.trim() : '';
+
+  if (!title) return c.json({ error: 'AI did not return a valid title.' }, 502);
+  const scheduledMs = Date.parse(scheduledAtRaw);
+  if (!Number.isFinite(scheduledMs)) {
+    return c.json({ error: 'AI did not return a valid schedule.' }, 502);
+  }
+
+  return c.json({
+    title: title.slice(0, 120),
+    description: description.slice(0, 1000),
+    venue: venue.slice(0, 120),
+    scheduledAt: new Date(scheduledMs).toISOString()
   });
 });
 
@@ -1270,13 +1637,11 @@ app.get('/counselor/students/:id/results', auth, requireRole('counselor'), async
   const [student, profile, result] = await Promise.all([
     c.env.DB.prepare('SELECT id, name, email FROM users WHERE id = ? AND role = ?').bind(studentId, 'student').first<{ id: number; name: string; email: string }>(),
     c.env.DB.prepare(
-      'SELECT strand, gwa, grades_json, ai_external_consent, ai_external_consent_at FROM profiles WHERE user_id = ?'
+      'SELECT strand, gwa, grades_json FROM profiles WHERE user_id = ?'
     ).bind(studentId).first<{
       strand?: string;
       gwa?: number;
       grades_json?: string;
-      ai_external_consent?: number;
-      ai_external_consent_at?: number | null;
     }>(),
     c.env.DB.prepare(
       'SELECT riasec_json, scct_json, holland_code, courses_json, careers_json, generated_at FROM results WHERE user_id = ?'
@@ -1298,9 +1663,7 @@ app.get('/counselor/students/:id/results', auth, requireRole('counselor'), async
       ? {
         strand: profile.strand ?? null,
         gwa: profile.gwa ?? null,
-        grades: profile.grades_json ? JSON.parse(profile.grades_json) : null,
-        aiExternalConsent: !!profile.ai_external_consent,
-        aiExternalConsentAt: profile.ai_external_consent_at ?? null
+        grades: profile.grades_json ? JSON.parse(profile.grades_json) : null
       }
       : null,
     results: result
@@ -1465,10 +1828,64 @@ app.post('/student/invitations/:id/respond', auth, requireRole('student'), async
 
   const student = await c.env.DB.prepare('SELECT name FROM users WHERE id = ?').bind(studentId).first<{ name: string }>();
   const action = body.status === 'accepted' ? 'accepted' : 'declined';
+  const studentName = student?.name ?? 'A student';
   await c.env.DB.prepare(
     "INSERT INTO activity (counselor_id, student_id, kind, text) VALUES (?, ?, 'seminar_response', ?)"
-  ).bind(invite.counselorId, studentId, `${student?.name ?? 'A student'} ${action} seminar invite: ${invite.title}.`).run();
+  ).bind(invite.counselorId, studentId, `${studentName} ${action} seminar invite: ${invite.title}.`).run();
 
+  await ensureNotificationsSchema(c.env.DB);
+  const notifTitle = `${studentName} ${action} your invitation`;
+  const notifBody = `${studentName} has ${action} the invitation to "${invite.title}".`;
+  const notifRow = await c.env.DB.prepare(
+    `INSERT INTO notifications (user_id, kind, title, body) VALUES (?, 'seminar_response', ?, ?) RETURNING id, created_at`
+  ).bind(invite.counselorId, notifTitle, notifBody).first<{ id: number; created_at: number }>();
+  if (notifRow) {
+    await pushNotification(c.env, invite.counselorId, {
+      id: notifRow.id,
+      kind: 'seminar_response',
+      title: notifTitle,
+      body: notifBody,
+      createdAt: notifRow.created_at,
+    });
+  }
+
+  return c.json({ ok: true });
+});
+
+// WebSocket upgrade — connects client to their notification Durable Object.
+app.get('/ws/notifications', async c => {
+  if (c.req.header('Upgrade') !== 'websocket') {
+    return c.json({ error: 'Expected WebSocket upgrade.' }, 426);
+  }
+  const token = new URL(c.req.url).searchParams.get('token');
+  if (!token) return c.json({ error: 'Missing token.' }, 401);
+  const payload = await verifyToken(token, c.env.JWT_SECRET);
+  if (!payload) return c.json({ error: 'Invalid token.' }, 401);
+
+  const stub = c.env.NOTIFICATIONS.get(c.env.NOTIFICATIONS.idFromName(payload.sub));
+  const doUrl = new URL(c.req.url);
+  doUrl.pathname = '/connect';
+  return stub.fetch(new Request(doUrl.toString(), c.req.raw));
+});
+
+app.get('/notifications', auth, async c => {
+  const userId = c.get('userId');
+  await ensureNotificationsSchema(c.env.DB);
+  const [countRow, rows] = await Promise.all([
+    c.env.DB.prepare(
+      'SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND read = 0'
+    ).bind(userId).first<{ count: number }>(),
+    c.env.DB.prepare(
+      'SELECT id, kind, title, body, read, created_at as createdAt FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 30'
+    ).bind(userId).all<{ id: number; kind: string; title: string; body: string; read: number; createdAt: number }>()
+  ]);
+  return c.json({ unread: countRow?.count ?? 0, notifications: rows.results ?? [] });
+});
+
+app.post('/notifications/read-all', auth, async c => {
+  const userId = c.get('userId');
+  await ensureNotificationsSchema(c.env.DB);
+  await c.env.DB.prepare('UPDATE notifications SET read = 1 WHERE user_id = ?').bind(userId).run();
   return c.json({ ok: true });
 });
 
@@ -1494,4 +1911,10 @@ app.onError((err, c) => {
   return c.json({ error: err.message || 'Server error' }, 500);
 });
 
-export default app;
+export { NotificationDO } from './notificationDO';
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    ctx.waitUntil(seedKnowledge(env));
+  }
+};

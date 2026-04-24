@@ -181,17 +181,23 @@ export default function CounselorDepartments() {
                 const isOpen = !!expanded[dept.id];
                 const joinUrl = dept.joinUrl || `${window.location.origin}/join/${dept.joinCode}`;
                 return (
-                  <div key={dept.id} className="p-4 sm:p-6">
+                  <div
+                    key={dept.id}
+                    className="p-4 sm:p-6 cursor-pointer hover:bg-cream-50 transition-colors"
+                    onClick={() => toggleDepartment(dept.id)}
+                  >
                     <div className="flex flex-wrap justify-between gap-3 items-start">
-                      <button
-                        type="button"
-                        onClick={() => toggleDepartment(dept.id)}
-                        className="text-left"
-                      >
-                        <div className="font-medium">{dept.name}</div>
+                      <div className="text-left">
+                        <div className="font-medium flex items-center gap-2">
+                          {dept.name}
+                          <span className="text-xs text-ink-500 font-normal">{isOpen ? '▲' : '▼'}</span>
+                        </div>
                         <div className="text-sm text-ink-500 mt-1">Code <span className="font-mono">{dept.joinCode}</span> · {dept.strand}</div>
-                      </button>
-                      <div className="flex items-center gap-3 flex-wrap">
+                      </div>
+                      <div
+                        className="flex items-center gap-3 flex-wrap"
+                        onClick={e => e.stopPropagation()}
+                      >
                         <div className="text-sm text-ink-500">{dept.students} students · {dept.completed} completed</div>
                         <CopyButton label="Copy Link" value={joinUrl} />
                         <CopyButton label="Copy Code" value={dept.joinCode} />
@@ -199,14 +205,14 @@ export default function CounselorDepartments() {
                     </div>
 
                     {isOpen && detail && (
-                      <div className="mt-4 border-t border-cream-300 pt-4">
+                      <div className="mt-4 border-t border-cream-300 pt-4" onClick={e => e.stopPropagation()}>
                         <div className="text-sm text-ink-500 mb-3 break-all">Join URL: {detail.joinUrl}</div>
                         {detail.students.length === 0 ? (
                           <div className="text-sm text-ink-500">No students joined yet.</div>
                         ) : (
-                          <div className="overflow-x-auto">
+                          <div className="overflow-x-auto max-h-[570px] overflow-y-auto">
                             <table className="w-full text-sm min-w-[960px]">
-                              <thead>
+                              <thead className="sticky top-0 bg-white z-10">
                                 <tr className="text-left text-ink-500 border-b border-cream-300">
                                   <th className="py-2 pr-3">Name</th>
                                   <th className="py-2 pr-3">Email</th>
@@ -222,29 +228,47 @@ export default function CounselorDepartments() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {detail.students.map(student => (
-                                  <tr key={student.id} className="border-t border-cream-200 align-top">
-                                    <td className="py-2 pr-3">{student.name}</td>
-                                    <td className="py-2 pr-3 text-ink-500">{student.email}</td>
-                                    <td className="py-2 pr-3">{student.status}</td>
-                                    <td className="py-2 pr-3">{student.topCareer || '—'}</td>
-                                    <td className="py-2 pr-3">{student.topCourse || '—'}</td>
-                                    <td className="py-2 pr-3">{student.bestSubject || '—'}</td>
-                                    <td className="py-2 pr-3 font-mono text-forest-700">{student.hollandCode || '—'}</td>
-                                    <td className="py-2 pr-3 text-right font-mono">{formatMetric(student.selfEfficacy)}</td>
-                                    <td className="py-2 pr-3 text-right font-mono">{formatMetric(student.outcomeExpectation)}</td>
-                                    <td className="py-2 pr-3 text-right font-mono">{formatMetric(student.perceivedBarriers)}</td>
-                                    <td className="py-2 pr-3 text-right">
-                                      <button
-                                        type="button"
-                                        onClick={() => removeStudent(dept.id, student.id)}
-                                        className="text-xs text-terracotta-600 hover:text-terracotta-800 underline"
-                                      >
-                                        Delete
-                                      </button>
-                                    </td>
-                                  </tr>
-                                ))}
+                                {detail.students.map(student => {
+                                  const statusStyle =
+                                    student.status === 'complete'
+                                      ? 'bg-forest-100 text-forest-700'
+                                      : student.status === 'in_progress'
+                                      ? 'bg-gold-500/15 text-gold-500'
+                                      : 'bg-terracotta-100 text-terracotta-600';
+                                  const statusLabel =
+                                    student.status === 'complete'
+                                      ? 'Completed'
+                                      : student.status === 'in_progress'
+                                      ? 'In Progress'
+                                      : 'Pending';
+                                  return (
+                                    <tr key={student.id} className="border-t border-cream-200 align-top">
+                                      <td className="py-2 pr-3">{student.name}</td>
+                                      <td className="py-2 pr-3 text-ink-500">{student.email}</td>
+                                      <td className="py-2 pr-3">
+                                        <span className={`text-xs font-mono px-2 py-0.5 rounded-full ${statusStyle}`}>
+                                          {statusLabel}
+                                        </span>
+                                      </td>
+                                      <td className="py-2 pr-3">{student.topCareer || '—'}</td>
+                                      <td className="py-2 pr-3">{student.topCourse || '—'}</td>
+                                      <td className="py-2 pr-3">{student.bestSubject || '—'}</td>
+                                      <td className="py-2 pr-3 font-mono text-forest-700">{student.hollandCode || '—'}</td>
+                                      <td className="py-2 pr-3 text-right font-mono">{formatMetric(student.selfEfficacy)}</td>
+                                      <td className="py-2 pr-3 text-right font-mono">{formatMetric(student.outcomeExpectation)}</td>
+                                      <td className="py-2 pr-3 text-right font-mono">{formatMetric(student.perceivedBarriers)}</td>
+                                      <td className="py-2 pr-3 text-right">
+                                        <button
+                                          type="button"
+                                          onClick={() => removeStudent(dept.id, student.id)}
+                                          className="text-xs text-terracotta-600 hover:text-terracotta-800 underline"
+                                        >
+                                          Delete
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
                           </div>

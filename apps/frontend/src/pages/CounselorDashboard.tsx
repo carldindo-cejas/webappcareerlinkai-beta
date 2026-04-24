@@ -5,6 +5,8 @@ import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { counselorNavItems } from '../lib/portalNav';
 import MiniCalendar, { CalendarEvent } from '../components/charts/MiniCalendar';
+import DonutChart, { DONUT_PALETTE, type DonutSlice } from '../components/charts/DonutChart';
+import RankedBar from '../components/charts/RankedBar';
 
 type Department = {
   id: number;
@@ -91,23 +93,38 @@ export default function CounselorDashboard() {
     load();
   }, []);
 
-  const metrics = useMemo(() => {
-    const students = stats?.totals.students ?? departments.reduce((sum, d) => sum + d.students, 0);
-    return {
-      departments: stats?.totals.departments ?? departments.length,
-      students,
-      topHolland: stats?.totals.topHolland ?? (stats?.holland?.[0]?.code ?? '—'),
-      topCareer: stats?.totals.topCareer ?? (stats?.topCareers?.[0]?.name ?? '—')
-    };
-  }, [departments, stats]);
-
   const events = useMemo<CalendarEvent[]>(
     () => seminars.map(s => ({ id: s.id, title: s.title, scheduledAt: s.scheduledAt, subtitle: s.departmentName })),
     [seminars]
   );
 
-  const rankedList = rankMode === 'careers' ? (stats?.topCareers ?? []) : (stats?.topCourses ?? []);
-  const hollandList = stats?.holland ?? [];
+  const nextEvent = useMemo(() => {
+    const now = Math.floor(Date.now() / 1000);
+    return (
+      seminars
+        .filter(s => s.scheduledAt > now)
+        .sort((a, b) => a.scheduledAt - b.scheduledAt)[0] ?? null
+    );
+  }, [seminars]);
+
+  const deptSlices = useMemo<DonutSlice[]>(
+    () =>
+      departments.map((d, i) => ({
+        label: d.name,
+        value: Math.max(d.students, 1),
+        color: DONUT_PALETTE[i % DONUT_PALETTE.length]
+      })),
+    [departments]
+  );
+
+  const totalStudents = stats?.totals.students ?? departments.reduce((sum, d) => sum + d.students, 0);
+  const studentBarMax = Math.max(1, ...departments.map(d => d.students));
+
+  const rankedList: RankedItem[] = rankMode === 'careers'
+    ? (stats?.topCareers ?? [])
+    : (stats?.topCourses ?? []);
+
+  const hollandRanked: RankedItem[] = (stats?.holland ?? []).map(h => ({ name: h.code, count: h.count }));
 
   return (
     <PortalLayout
@@ -115,20 +132,104 @@ export default function CounselorDashboard() {
       subtitle={`Welcome back, ${user?.name || 'Counselor'}`}
       navItems={counselorNavItems}
     >
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        {[
-          ['Departments Handled', metrics.departments],
-          ['Students', metrics.students],
-          ['Top Holland Code', metrics.topHolland ?? '—'],
-          ['Top Career', metrics.topCareer ?? '—']
-        ].map(([label, value]) => (
-          <div key={label as string} className="bg-white border border-cream-300 rounded-lg p-5">
-            <div className="font-mono text-[11px] tracking-[0.12em] uppercase text-ink-300 mb-2">{label}</div>
-            <div className="font-display text-2xl lg:text-3xl text-forest-700 leading-tight truncate" title={String(value)}>
-              {value}
+      {!loading && nextEvent && (
+        <div className="mb-6 rounded-lg border border-gold-500/50 bg-gold-500/10 px-5 py-4 flex items-start gap-4">
+          <div className="mt-2 w-2 h-2 rounded-full bg-gold-500 shrink-0 animate-pulse" />
+          <div className="flex-1 min-w-0">
+            <div className="font-mono text-[11px] tracking-[0.12em] uppercase text-gold-500 mb-0.5">Upcoming Activity</div>
+            <div className="font-medium text-ink-900 truncate">{nextEvent.title}</div>
+            <div className="text-sm text-ink-500 mt-0.5">
+              {new Date(nextEvent.scheduledAt * 1000).toLocaleString(undefined, {
+                weekday: 'short', month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit'
+              })}
+              {' · '}{nextEvent.departmentName}
             </div>
           </div>
-        ))}
+          <Link
+            to="/portal/counselor/events"
+            className="text-xs font-mono uppercase tracking-[0.1em] px-3 py-1.5 border border-gold-500/50 rounded hover:bg-gold-500/20 text-gold-500 shrink-0"
+          >
+            View
+          </Link>
+        </div>
+      )}
+
+      <section className="grid lg:grid-cols-2 gap-6 mb-6">
+        <div className="bg-white border border-cream-300 rounded-lg p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-xl">Departments Handled</h2>
+              <p className="text-sm text-ink-500 mt-0.5">Student distribution across departments</p>
+            </div>
+            <Link to="/portal/counselor/departments" className="text-sm text-forest-700 hover:underline">Manage</Link>
+          </div>
+          {loading ? (
+            <div className="text-ink-500">Loading…</div>
+          ) : departments.length === 0 ? (
+            <div className="text-ink-500">No departments yet.</div>
+          ) : (
+            <div className="flex items-center gap-5 flex-wrap">
+              <DonutChart
+                slices={deptSlices}
+                size={180}
+                centerLabel={String(departments.length)}
+                centerSub={departments.length === 1 ? 'Dept' : 'Depts'}
+              />
+              <ul className="space-y-2 text-sm flex-1 min-w-[140px]">
+                {deptSlices.map((s, i) => {
+                  const pct = totalStudents
+                    ? Math.round((departments[i].students / totalStudents) * 100)
+                    : 0;
+                  return (
+                    <li key={s.label} className="flex items-center gap-2">
+                      <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: s.color }} />
+                      <span className="truncate flex-1" title={s.label}>{s.label}</span>
+                      <span className="font-mono text-[11px] text-ink-500 shrink-0">
+                        {departments[i].students} · {pct}%
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white border border-cream-300 rounded-lg p-6">
+          <div className="mb-4">
+            <h2 className="text-xl">Students</h2>
+            <p className="text-sm text-ink-500 mt-0.5">Enrolled students per department</p>
+          </div>
+          {loading ? (
+            <div className="text-ink-500">Loading…</div>
+          ) : departments.length === 0 ? (
+            <div className="text-ink-500">No departments yet.</div>
+          ) : (
+            <div className="space-y-2.5">
+              {departments.map(d => {
+                const pct = (d.students / studentBarMax) * 100;
+                return (
+                  <div key={d.id}>
+                    <div className="flex justify-between text-sm mb-1 gap-2">
+                      <span className="truncate" title={d.name}>{d.name}</span>
+                      <span className="font-mono text-ink-500 shrink-0">{d.students}</span>
+                    </div>
+                    <div className="h-2.5 bg-cream-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-forest-700 rounded-full transition-all duration-300"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="pt-1 text-sm text-ink-500 font-mono">
+                Total: <span className="text-forest-700 font-semibold">{totalStudents}</span>
+              </div>
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="grid lg:grid-cols-[1.3fr_1fr] gap-6 mb-6">
@@ -154,20 +255,8 @@ export default function CounselorDashboard() {
           </div>
           {loading ? (
             <div className="text-ink-500">Loading…</div>
-          ) : rankedList.length === 0 ? (
-            <div className="text-ink-500">No predictions yet.</div>
           ) : (
-            <ol className="space-y-2">
-              {rankedList.map((item, idx) => (
-                <li key={item.name} className="flex justify-between items-center gap-3 border-b border-dashed border-cream-300 pb-2 last:border-0">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="font-mono text-xs text-ink-300 w-6 shrink-0">#{idx + 1}</span>
-                    <span className="truncate">{item.name}</span>
-                  </div>
-                  <span className="font-mono text-sm text-forest-700 shrink-0">{item.count}</span>
-                </li>
-              ))}
-            </ol>
+            <RankedBar items={rankedList} maxItems={5} emptyText="No predictions yet." />
           )}
         </div>
 
@@ -178,20 +267,8 @@ export default function CounselorDashboard() {
           </div>
           {loading ? (
             <div className="text-ink-500">Loading…</div>
-          ) : hollandList.length === 0 ? (
-            <div className="text-ink-500">No results yet.</div>
           ) : (
-            <ol className="space-y-2">
-              {hollandList.map((h, idx) => (
-                <li key={h.code} className="flex justify-between items-center gap-3 border-b border-dashed border-cream-300 pb-2 last:border-0">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="font-mono text-xs text-ink-300 w-6 shrink-0">#{idx + 1}</span>
-                    <span className="font-mono text-forest-700">{h.code}</span>
-                  </div>
-                  <span className="font-mono text-sm text-ink-500 shrink-0">{h.count}</span>
-                </li>
-              ))}
-            </ol>
+            <RankedBar items={hollandRanked} maxItems={5} emptyText="No results yet." />
           )}
         </div>
       </section>

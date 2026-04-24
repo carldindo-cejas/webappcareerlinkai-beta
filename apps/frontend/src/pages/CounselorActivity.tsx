@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import PortalLayout from '../components/PortalLayout';
 import { counselorNavItems } from '../lib/portalNav';
 import { api } from '../lib/api';
+import { useNotifications } from '../lib/NotificationContext';
 
 type Department = {
   id: number;
@@ -61,6 +62,7 @@ type SeminarDetail = {
 };
 
 export default function CounselorActivity() {
+  const { lastNotification } = useNotifications();
   const [departments, setDepartments] = useState<Department[]>([]);
   const [details, setDetails] = useState<Record<number, DepartmentDetail>>({});
   const [feed, setFeed] = useState<ActivityFeed[]>([]);
@@ -73,6 +75,9 @@ export default function CounselorActivity() {
   const [selectedDeptIds, setSelectedDeptIds] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
 
   const [viewEvent, setViewEvent] = useState<GroupedEvent | null>(null);
   const [viewDetails, setViewDetails] = useState<SeminarDetail[]>([]);
@@ -99,6 +104,12 @@ export default function CounselorActivity() {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    if (lastNotification?.kind === 'seminar_response') {
+      load();
+    }
+  }, [lastNotification]);
 
   const groupedEvents = useMemo<GroupedEvent[]>(() => {
     const rows: EventRow[] = [];
@@ -131,6 +142,34 @@ export default function CounselorActivity() {
 
   function toggleDept(id: number) {
     setSelectedDeptIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  }
+
+  async function generateWithAi() {
+    const prompt = aiPrompt.trim();
+    if (!prompt) {
+      setError('Describe the event so AI can draft it.');
+      return;
+    }
+    setError(null);
+    setAiLoading(true);
+    try {
+      const draft = await api<{ title: string; description: string; venue: string; scheduledAt: string }>(
+        '/counselor/events/ai-draft',
+        { method: 'POST', body: JSON.stringify({ prompt }) }
+      );
+      setTitle(draft.title || '');
+      setDescription(draft.description || '');
+      setVenue(draft.venue || '');
+      const parsed = new Date(draft.scheduledAt);
+      if (!Number.isNaN(parsed.getTime())) {
+        const tzOffsetMs = parsed.getTimezoneOffset() * 60000;
+        setScheduledAt(new Date(parsed.getTime() - tzOffsetMs).toISOString().slice(0, 16));
+      }
+    } catch (aiErr: any) {
+      setError(aiErr?.message || 'AI could not draft this event.');
+    } finally {
+      setAiLoading(false);
+    }
   }
 
   async function createActivity(e: FormEvent) {
@@ -214,6 +253,34 @@ export default function CounselorActivity() {
       <div className="grid xl:grid-cols-[1.1fr_1fr] gap-6">
         <section className="bg-white border border-cream-300 rounded-lg p-6">
           <h2 className="text-xl mb-4">Create Activity</h2>
+
+          <div className="mb-5 p-4 rounded-lg border border-forest-200 bg-forest-50/40">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div>
+                <div className="eyebrow">AI Assist</div>
+                <div className="text-sm text-ink-700 font-medium">Describe the event, AI will fill the fields</div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary text-xs"
+                onClick={generateWithAi}
+                disabled={aiLoading}
+              >
+                {aiLoading ? 'Generating…' : 'Generate with AI'}
+              </button>
+            </div>
+            <textarea
+              className="input min-h-20"
+              value={aiPrompt}
+              onChange={e => setAiPrompt(e.target.value)}
+              placeholder='e.g. "Career orientation for STEM seniors next Friday at 2pm in AVR 2"'
+              disabled={aiLoading}
+            />
+            <div className="text-xs text-ink-500 mt-1">
+              Fields below are editable after AI fills them in.
+            </div>
+          </div>
+
           <form onSubmit={createActivity} className="space-y-4">
             <div>
               <label className="block text-sm mb-1">Title</label>

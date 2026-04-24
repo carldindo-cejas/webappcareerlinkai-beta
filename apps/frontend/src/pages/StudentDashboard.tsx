@@ -21,8 +21,7 @@ type ResultSummary = {
 
 type ExplainResponse = {
   reply: string;
-  source: 'rule_based' | 'external_ai';
-  externalAi: { consented: boolean; configured: boolean; used: boolean };
+  source: 'rule_based' | 'ai';
 };
 
 const REQUIRED_RIASEC = 48;
@@ -86,6 +85,30 @@ export default function StudentDashboard() {
   }, []);
 
   const bestSubject = useMemo(() => bestSubjectFromGrades(profile?.grades), [profile]);
+  const hasBasicsStep = Boolean(profile?.basicsCompleted || user?.basicsCompleted);
+  const hasOnboardingStep = Boolean(user?.onboarded && profile?.strand && profile?.grades);
+  const hasRiasecStep = riasecAnswered >= REQUIRED_RIASEC;
+  const hasScctStep = scctAnswered >= REQUIRED_SCCT;
+  const hasResultStep = Boolean(results);
+
+  const isEvaluationComplete = hasBasicsStep && hasOnboardingStep && hasRiasecStep && hasScctStep && hasResultStep;
+
+  const nextEvaluationPath = (() => {
+    if (!hasBasicsStep) return '/profile/basics';
+    if (!hasOnboardingStep) return '/onboarding';
+    if (!hasRiasecStep) return '/assessment/riasec';
+    if (!hasScctStep) return '/assessment/scct';
+    return '/portal/student/result';
+  })();
+
+  const nextEvaluationStep = (() => {
+    if (!hasBasicsStep) return 1;
+    if (!hasOnboardingStep) return 2;
+    if (!hasRiasecStep) return 3;
+    if (!hasScctStep) return 4;
+    return 5;
+  })();
+
   const profileCompletion = useMemo(() => {
     const checks = [
       !!profile?.school,
@@ -132,10 +155,15 @@ export default function StudentDashboard() {
             <section className="bg-white border border-cream-300 rounded-lg p-6">
               <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
                 <h2 className="text-xl">Student summary</h2>
-                <Link to="/portal/student/result" className="btn btn-primary btn-sm">
-                  View assessment result
+                <Link to={isEvaluationComplete ? '/portal/student/result' : nextEvaluationPath} className="btn btn-primary btn-sm">
+                  {isEvaluationComplete ? 'View assessment result' : 'Complete CareerLink Evaluation'}
                 </Link>
               </div>
+              {!isEvaluationComplete && (
+                <p className="text-xs text-ink-500 mb-4">
+                  Continue from step {nextEvaluationStep} of 5.
+                </p>
+              )}
 
               <div className="grid sm:grid-cols-3 gap-4 text-sm">
                 <div className="border border-cream-300 rounded p-3">

@@ -1,9 +1,27 @@
-import { useState, FormEvent } from 'react';
+import { useEffect, useState, FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import { useAuth } from '../lib/auth';
 import { SCHOOLS } from '../data/schools';
 import { isValidJoinCode, normalizeJoinCode } from '../lib/joinCode';
+
+const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const INPUT_ERROR_CLASS = 'border-terracotta-500 focus:border-terracotta-500 focus:shadow-[0_0_0_3px_rgba(197,106,74,0.12)]';
+
+type FormField =
+  | 'firstName'
+  | 'lastName'
+  | 'school'
+  | 'email'
+  | 'password'
+  | 'confirmPassword'
+  | 'inviteCode'
+  | 'acceptedPolicies';
+
+function isStrongPassword(value: string): boolean {
+  return STRONG_PASSWORD_REGEX.test(value);
+}
 
 export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signup' }) {
   const [mode, setMode] = useState<'signin' | 'signup'>(initialMode ?? 'signin');
@@ -13,31 +31,103 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
   const [school, setSchool] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [acceptedPolicies, setAcceptedPolicies] = useState(false);
   const [activePolicy, setActivePolicy] = useState<'terms' | 'privacy' | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<FormField, boolean>>>({});
   const [busy, setBusy] = useState(false);
   const { signIn, signUp } = useAuth();
   const navigate = useNavigate();
 
+  useEffect(() => {
+    setErr(null);
+    setFieldErrors({});
+  }, [mode, role]);
+
+  function clearFieldError(field: FormField) {
+    setFieldErrors(prev => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+  }
+
+  function markFieldErrors(fields: FormField[]) {
+    if (fields.length === 0) return;
+    setFieldErrors(prev => {
+      const next = { ...prev };
+      for (const field of fields) next[field] = true;
+      return next;
+    });
+  }
+
+  function setFormError(message: string, fields: FormField[] = []) {
+    setErr(message);
+    markFieldErrors(fields);
+  }
+
+  function inputClass(field: FormField): string {
+    return `input ${fieldErrors[field] ? INPUT_ERROR_CLASS : ''}`;
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setErr(null);
+    setFieldErrors({});
+
+    const emailValue = email.trim();
     const invite = normalizeJoinCode(inviteCode);
 
-    if (mode === 'signup' && role === 'student') {
-      if (!invite) {
-        setErr('Department invitation code is required to create a student account.');
+    if (!emailValue) {
+      setFormError('Email is required.', ['email']);
+      return;
+    }
+    if (!EMAIL_REGEX.test(emailValue)) {
+      setFormError('Please enter a valid school email.', ['email']);
+      return;
+    }
+    if (!password) {
+      setFormError('Password is required.', ['password']);
+      return;
+    }
+
+    if (mode === 'signup') {
+      if (!firstName.trim()) {
+        setFormError('First name is required.', ['firstName']);
         return;
       }
-      if (!isValidJoinCode(invite)) {
-        setErr('Invitation code must be 6 characters (letters and numbers only).');
+      if (!lastName.trim()) {
+        setFormError('Last name is required.', ['lastName']);
+        return;
+      }
+      if (role === 'counselor' && !school) {
+        setFormError('School is required for counselor sign up.', ['school']);
+        return;
+      }
+      if (!isStrongPassword(password)) {
+        setFormError('Password must be at least 8 characters and include uppercase, lowercase, number, and special character.', ['password']);
+        return;
+      }
+      if (password !== confirmPassword) {
+        setFormError('Confirm password must match your password.', ['password', 'confirmPassword']);
         return;
       }
       if (!acceptedPolicies) {
-        setErr('Please agree to the Terms and Privacy Policy to continue.');
+        setFormError('Please agree to the Terms and Privacy Policy to continue.', ['acceptedPolicies']);
         return;
+      }
+      if (role === 'student') {
+        if (!invite) {
+          setFormError('Department invitation code is required to create a student account.', ['inviteCode']);
+          return;
+        }
+        if (!isValidJoinCode(invite)) {
+          setFormError('Invitation code must be 6 characters (letters and numbers only).', ['inviteCode']);
+          return;
+        }
       }
     }
 
@@ -45,15 +135,16 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
     try {
       const user =
         mode === 'signin'
-          ? await signIn(email, password, role)
+          ? await signIn(emailValue, password, role)
           : await signUp({
             firstName,
             lastName,
-            email,
+            email: emailValue,
             password,
             role,
             school: role === 'counselor' ? school : undefined,
-            inviteCode: role === 'student' ? invite : undefined
+            inviteCode: role === 'student' ? invite : undefined,
+            acceptedPolicies
           });
 
       if (user.role === 'counselor') navigate('/portal/counselor');
@@ -61,7 +152,32 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
       else if (!user.basicsCompleted) navigate('/profile/basics');
       else navigate('/start-evaluation');
     } catch (e: any) {
-      setErr(e.message || 'Something went wrong.');
+      const message = e?.message || 'Something went wrong.';
+      setErr(message);
+
+      const mapped = new Set<FormField>();
+      const text = String(message).toLowerCase();
+      if (text.includes('email') && text.includes('password')) {
+        mapped.add('email');
+        mapped.add('password');
+      }
+      if (text.includes('email')) mapped.add('email');
+      if (text.includes('password')) mapped.add('password');
+      if (text.includes('first') || text.includes('last')) {
+        mapped.add('firstName');
+        mapped.add('lastName');
+      }
+      if (text.includes('school')) mapped.add('school');
+      if (text.includes('invitation') || text.includes('invite')) mapped.add('inviteCode');
+      if (text.includes('confirm')) mapped.add('confirmPassword');
+      if (text.includes('terms') || text.includes('privacy')) mapped.add('acceptedPolicies');
+      if (mode === 'signup' && text.includes('already exists')) mapped.add('email');
+      if (mode === 'signin' && mapped.size === 0) {
+        mapped.add('email');
+        mapped.add('password');
+      }
+
+      markFieldErrors(Array.from(mapped));
     } finally {
       setBusy(false);
     }
@@ -136,16 +252,19 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
             </div>
           )}
 
-          <form onSubmit={onSubmit} className="space-y-5">
+          <form onSubmit={onSubmit} noValidate className="space-y-5">
             {mode === 'signup' && (
               <div className="grid sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[13px] font-medium mb-2">First name</label>
                   <input
-                    className="input"
+                    className={inputClass('firstName')}
                     required
                     value={firstName}
-                    onChange={e => setFirstName(e.target.value)}
+                    onChange={e => {
+                      setFirstName(e.target.value);
+                      clearFieldError('firstName');
+                    }}
                     placeholder="First name"
                     autoComplete="given-name"
                   />
@@ -153,10 +272,13 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
                 <div>
                   <label className="block text-[13px] font-medium mb-2">Last name</label>
                   <input
-                    className="input"
+                    className={inputClass('lastName')}
                     required
                     value={lastName}
-                    onChange={e => setLastName(e.target.value)}
+                    onChange={e => {
+                      setLastName(e.target.value);
+                      clearFieldError('lastName');
+                    }}
                     placeholder="Last name"
                     autoComplete="family-name"
                   />
@@ -167,10 +289,13 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
               <div>
                 <label className="block text-[13px] font-medium mb-2">School</label>
                 <select
-                  className="input"
+                  className={inputClass('school')}
                   required
                   value={school}
-                  onChange={e => setSchool(e.target.value)}
+                  onChange={e => {
+                    setSchool(e.target.value);
+                    clearFieldError('school');
+                  }}
                 >
                   <option value="">Choose your school</option>
                   {SCHOOLS.map(s => <option key={s} value={s}>{s}</option>)}
@@ -180,11 +305,14 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
             <div>
               <label className="block text-[13px] font-medium mb-2">School email</label>
               <input
-                className="input"
+                className={inputClass('email')}
                 type="email"
                 required
                 value={email}
-                onChange={e => setEmail(e.target.value)}
+                onChange={e => {
+                  setEmail(e.target.value);
+                  clearFieldError('email');
+                }}
                 placeholder="you@school.edu.ph"
                 autoComplete="email"
               />
@@ -192,54 +320,87 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
             <div>
               <label className="block text-[13px] font-medium mb-2">Password</label>
               <input
-                className="input"
+                className={inputClass('password')}
                 type="password"
                 required
                 minLength={8}
                 value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder={mode === 'signup' ? 'At least 8 characters' : 'Enter your password'}
+                onChange={e => {
+                  setPassword(e.target.value);
+                  clearFieldError('password');
+                }}
+                placeholder={mode === 'signup' ? '8+ chars with upper/lower/number/special' : 'Enter your password'}
                 autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
               />
+              {mode === 'signup' && (
+                <p className="mt-2 text-xs text-ink-500">Must include uppercase, lowercase, number, and special character.</p>
+              )}
             </div>
 
+            {mode === 'signup' && (
+              <div>
+                <label className="block text-[13px] font-medium mb-2">Confirm password</label>
+                <input
+                  className={inputClass('confirmPassword')}
+                  type="password"
+                  required
+                  minLength={8}
+                  value={confirmPassword}
+                  onChange={e => {
+                    setConfirmPassword(e.target.value);
+                    clearFieldError('confirmPassword');
+                  }}
+                  placeholder="Retype your password"
+                  autoComplete="new-password"
+                />
+              </div>
+            )}
+
             {role === 'student' && mode === 'signup' && (
-              <div className="space-y-4">
+              <div>
                 <div>
                   <label className="block text-[13px] font-medium mb-2">
                   Department invitation code or ID
                   </label>
                   <input
-                    className="input"
+                    className={inputClass('inviteCode')}
                     required
                     value={inviteCode}
-                    onChange={e => setInviteCode(e.target.value)}
+                    onChange={e => {
+                      setInviteCode(e.target.value);
+                      clearFieldError('inviteCode');
+                    }}
                     placeholder="Enter code from your counselor"
                   />
                 </div>
+              </div>
+            )}
 
-                <div className="bg-cream-50 border border-cream-300 rounded-lg px-4 py-3.5">
-                  <label className="flex items-start gap-3 text-sm text-ink-700 leading-relaxed">
-                    <input
-                      type="checkbox"
-                      className="mt-1"
-                      checked={acceptedPolicies}
-                      onChange={e => setAcceptedPolicies(e.target.checked)}
-                    />
-                    <span>
-                      I agree to the{' '}
-                      <button type="button" className="text-forest-700 font-medium hover:underline" onClick={() => setActivePolicy('terms')}>
-                        Terms and Conditions
-                      </button>
-                      {' '}and{' '}
-                      <button type="button" className="text-forest-700 font-medium hover:underline" onClick={() => setActivePolicy('privacy')}>
-                        Privacy Policy
-                      </button>
-                      .
-                    </span>
-                  </label>
-                  <p className="mt-2 text-xs text-ink-500">Required to create a student account.</p>
-                </div>
+            {mode === 'signup' && (
+              <div className={`bg-cream-50 border rounded-lg px-4 py-3.5 ${fieldErrors.acceptedPolicies ? 'border-terracotta-500 bg-terracotta-100/40' : 'border-cream-300'}`}>
+                <label className="flex items-start gap-3 text-sm text-ink-700 leading-relaxed">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={acceptedPolicies}
+                    onChange={e => {
+                      setAcceptedPolicies(e.target.checked);
+                      clearFieldError('acceptedPolicies');
+                    }}
+                  />
+                  <span>
+                    I agree to the{' '}
+                    <button type="button" className="text-forest-700 font-medium hover:underline" onClick={() => setActivePolicy('terms')}>
+                      Terms and Conditions
+                    </button>
+                    {' '}and{' '}
+                    <button type="button" className="text-forest-700 font-medium hover:underline" onClick={() => setActivePolicy('privacy')}>
+                      Privacy Policy
+                    </button>
+                    .
+                  </span>
+                </label>
+                <p className="mt-2 text-xs text-ink-500">Required to create an account.</p>
               </div>
             )}
 
