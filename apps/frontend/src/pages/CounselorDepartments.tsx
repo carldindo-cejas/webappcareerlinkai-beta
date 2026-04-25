@@ -140,9 +140,11 @@ export default function CounselorDepartments() {
       title="Departments"
       subtitle="Create departments, share invitation code/link, and view students per department"
       navItems={counselorNavItems}
-      rightHeader={<button onClick={() => setShowNew(true)} className="btn btn-primary">+ Create Department</button>}
     >
       <div className="space-y-6">
+        <div className="flex justify-end">
+          <button onClick={() => setShowNew(true)} className="btn btn-primary">+ Create Department</button>
+        </div>
         {created && (
           <section className="bg-white border border-cream-300 rounded-lg p-6">
             <div className="flex items-start justify-between gap-4 flex-wrap">

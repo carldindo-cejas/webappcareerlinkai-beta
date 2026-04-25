@@ -5,6 +5,7 @@ import { hollandCode, scoreRiasec, scoreScct } from './scoring';
 import { predictFromDatasetMl } from './ml/predictor';
 import { retrieveContext, runLlama, type ChatMessage, type RetrievedDoc } from './ai';
 import { seedKnowledge, SCCT_QUESTIONS } from './knowledge';
+import { buildStudentContext, renderContextForPrompt, type StudentContext } from './studentContext';
 
 type Bindings = {
   DB: D1Database;
@@ -391,13 +392,7 @@ function formatKnowledgeBlock(docs: RetrievedDoc[]): string {
 async function getExplainAiReply(
   env: Bindings,
   question: string,
-  context: {
-    hollandCode: string;
-    topCourse: string;
-    topCareer: string;
-    strand: string | null;
-    scct: Record<string, number>;
-  }
+  context: StudentContext
 ): Promise<string | null> {
   const retrieved = await retrieveContext(env, question, KNOWLEDGE_TARGET_TOP_K);
   const groundedDocs = selectGroundedKnowledge(retrieved);
@@ -417,11 +412,8 @@ async function getExplainAiReply(
     'Ground factual claims strictly on the reference notes below. If references do not support a claim, say you are unsure instead of guessing.',
     sourceCitationInstruction,
     scctQuestionReference ? 'When discussing SCCT score interpretation, explicitly anchor your explanation to the SCCT questionnaire items below.' : '',
-    `Student Holland code: ${context.hollandCode}`,
-    `Top course: ${context.topCourse}`,
-    `Top career: ${context.topCareer}`,
-    `Current strand: ${context.strand ?? 'N/A'}`,
-    `SCCT: self-efficacy=${(context.scct.self_efficacy ?? 3).toFixed(1)}, outcome expectations=${(context.scct.outcome_expectations ?? 3).toFixed(1)}, perceived barriers=${(context.scct.perceived_barriers ?? 3).toFixed(1)}`,
+    'Address the student by their first name when natural and tailor the reasoning to their strand, grade level, and SCCT scores.',
+    `\nStudent profile:\n${renderContextForPrompt(context)}`,
     knowledge,
     scctQuestionReference
   ].filter(Boolean).join('\n');
@@ -438,17 +430,10 @@ async function getExplainAiReply(
 
 async function getCounselorAiReply(
   env: Bindings,
-  context: { hollandCode?: string; topCourse?: string; topCareer?: string; strand?: string | null },
+  context: StudentContext,
   history: Array<{ role: string; content: string }>,
   question: string
 ): Promise<string | null> {
-  const ctxLines = [
-    context.hollandCode && `Student Holland code: ${context.hollandCode}`,
-    context.topCourse && `Top recommended course: ${context.topCourse}`,
-    context.topCareer && `Top recommended career: ${context.topCareer}`,
-    context.strand && `Current strand: ${context.strand}`,
-  ].filter(Boolean).join('\n');
-
   const retrieved = await retrieveContext(env, question, KNOWLEDGE_TARGET_TOP_K);
   const groundedDocs = selectGroundedKnowledge(retrieved);
   if (!groundedDocs.length) return null;
@@ -460,6 +445,13 @@ async function getCounselorAiReply(
   const sourceCitationInstruction = hasSourceUrls(groundedDocs)
     ? 'If you use facts from a referenced source URL, include a final line "Sources:" with up to 3 URLs you used.'
     : '';
+
+  const statusGuidance =
+    context.assessmentStatus === 'complete'
+      ? 'The student has completed both assessments. When giving advice, tailor it to their Holland code, SCCT scores, strand, grade level, and other known details below.'
+      : context.assessmentStatus === 'in_progress'
+      ? 'The student has NOT finished the assessment yet. Do not invent a Holland code or SCCT scores. Encourage them to finish the remaining items, and answer general questions using what is known (strand, grade level, school, subjects).'
+      : 'The student has NOT started the assessment yet. Do not invent a Holland code or SCCT scores. Greet them by name, answer general questions, and encourage them to take the assessment.';
 
   const systemPrompt = [
     'You are a career counseling assistant for senior high school students in the Philippines.',
@@ -474,7 +466,9 @@ async function getCounselorAiReply(
     'Use short paragraphs and use bullet points (-) or numbered steps (1.) when listing recommendations.',
     'Highlight key advice with **bold** text.',
     'Keep responses encouraging and under 220 words.',
-    ctxLines ? `\nStudent profile:\n${ctxLines}` : '',
+    'Address the student by their first name when natural.',
+    statusGuidance,
+    `\nStudent profile:\n${renderContextForPrompt(context)}`,
     knowledge,
     scctQuestionReference
   ].filter(Boolean).join('\n');
@@ -916,29 +910,25 @@ app.post('/ai/explain', auth, requireRole('student'), async c => {
   if (!question) return c.json({ error: 'Question is required.' }, 400);
   if (question.length > 1000) return c.json({ error: 'Question is too long.' }, 400);
 
-  const [result, profile] = await Promise.all([
-    c.env.DB.prepare(
-      'SELECT holland_code, courses_json, careers_json, scct_json FROM results WHERE user_id = ?'
-    ).bind(userId).first<{ holland_code: string; courses_json: string; careers_json: string; scct_json: string }>(),
-    c.env.DB.prepare(
-      'SELECT strand FROM profiles WHERE user_id = ?'
-    ).bind(userId).first<{ strand?: string }>()
-  ]);
+  const context = await buildStudentContext(c.env.DB, userId);
+  if (!context) return c.json({ error: 'Student profile not found.' }, 404);
+  if (context.assessmentStatus !== 'complete') {
+    return c.json({ error: 'Generate your results first before using AI explanation.' }, 400);
+  }
 
-  if (!result) return c.json({ error: 'Generate your results first before using AI explanation.' }, 400);
-
-  const courses = JSON.parse(result.courses_json) as Array<{ name: string }>;
-  const careers = JSON.parse(result.careers_json) as Array<{ name: string }>;
-  const scct = JSON.parse(result.scct_json) as Record<string, number>;
-  const context = {
-    hollandCode: result.holland_code,
-    topCourse: courses[0]?.name ?? 'N/A',
-    topCareer: careers[0]?.name ?? 'N/A',
-    strand: profile?.strand ?? null,
-    scct
+  const ruleBasedContext = {
+    hollandCode: context.hollandCode ?? 'N/A',
+    topCourse: context.topCourse ?? 'N/A',
+    topCareer: context.topCareer ?? 'N/A',
+    strand: context.strand,
+    scct: {
+      self_efficacy: context.selfEfficacy ?? 3,
+      outcome_expectations: context.outcomeExpectation ?? 3,
+      perceived_barriers: context.perceivedBarriers ?? 3,
+    },
   };
 
-  let reply = buildRuleBasedAiReply(question, context);
+  let reply = buildRuleBasedAiReply(question, ruleBasedContext);
   let source: 'rule_based' | 'ai' = 'rule_based';
 
   await ensureAiChatSchema(c.env.DB);
@@ -1044,21 +1034,9 @@ app.post('/ai/sessions/:id/chat', auth, requireRole('student'), async c => {
   ).bind(sessionId).all<{ role: string; content: string }>();
   const history = (historyRs.results ?? []).reverse().slice(0, -1);
 
-  const [result, profile] = await Promise.all([
-    c.env.DB.prepare(
-      'SELECT holland_code, courses_json, careers_json FROM results WHERE user_id = ?'
-    ).bind(userId).first<{ holland_code: string; courses_json: string; careers_json: string }>().catch(() => null),
-    c.env.DB.prepare('SELECT strand FROM profiles WHERE user_id = ?')
-      .bind(userId).first<{ strand?: string }>().catch(() => null),
-  ]);
-
-  const ctx: { hollandCode?: string; topCourse?: string; topCareer?: string; strand?: string | null } = {};
-  if (result) {
-    ctx.hollandCode = result.holland_code;
-    try { ctx.topCourse = (JSON.parse(result.courses_json) as any[])[0]?.name; } catch { /* ignore */ }
-    try { ctx.topCareer = (JSON.parse(result.careers_json) as any[])[0]?.name; } catch { /* ignore */ }
-  }
-  if (profile) ctx.strand = profile.strand;
+  await ensureProfilesSchema(c.env.DB);
+  const ctx = await buildStudentContext(c.env.DB, userId);
+  if (!ctx) return c.json({ error: 'Student profile not found.' }, 404);
 
   c.executionCtx.waitUntil(ensureVectorizeSeed(c.env));
   let reply: string;

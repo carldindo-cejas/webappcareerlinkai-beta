@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import Landing from './pages/Landing';
 import SignIn from './pages/SignIn';
 import ProfileBasics from './pages/ProfileBasics';
@@ -24,8 +24,9 @@ import { useAuth } from './lib/auth';
 
 function Protected({ children, role }: { children: JSX.Element; role?: 'student' | 'counselor' }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
   if (loading) return <div className="min-h-screen flex items-center justify-center text-ink-500">Loading…</div>;
-  if (!user) return <Navigate to="/signin" replace />;
+  if (!user) return <Navigate to="/signin" state={{ from: location }} replace />;
   if (role && user.role !== role) return <Navigate to="/" replace />;
   return children;
 }

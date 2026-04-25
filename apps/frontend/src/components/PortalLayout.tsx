@@ -71,6 +71,90 @@ function SignOutIcon() {
   );
 }
 
+function GridIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.6" />
+      <rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.6" />
+      <rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.6" />
+      <rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+function CalendarIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect x="3" y="4" width="18" height="18" rx="2" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M16 2v4M8 2v4M3 10h18" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function LayersIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M12 2L2 7l10 5 10-5-10-5Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+      <path d="M2 12l10 5 10-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M2 17l10 5 10-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function BarChartIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M18 20V10M12 20V4M6 20v-6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function StarIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ClockIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M12 7v5l3 3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function SparkleIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 3v2M12 19v2M3 12h2M19 12h2M5.64 5.64l1.42 1.42M16.95 16.95l1.41 1.41M5.64 18.36l1.42-1.41M16.95 7.05l1.41-1.41"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+      <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+function getNavIcon(to: string): ReactNode {
+  if (to.includes('ai-counselor')) return <SparkleIcon />;
+  if (to.includes('analytics')) return <BarChartIcon />;
+  if (to.includes('departments')) return <LayersIcon />;
+  if (to.includes('events') || to.includes('activity')) return <CalendarIcon />;
+  if (to.includes('result')) return <StarIcon />;
+  if (to.includes('activity')) return <ClockIcon />;
+  return <GridIcon />;
+}
+
 function getInitials(name?: string | null) {
   if (!name) return '?';
   const parts = name.trim().split(/\s+/);
@@ -150,7 +234,25 @@ export default function PortalLayout({
               ))}
             </nav>
           )}
-          {collapsed && <div className="flex-1" />}
+
+          {collapsed && (
+            <nav className="p-3 space-y-1 flex-1 overflow-y-auto">
+              {navItems.map(item => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  onClick={() => setMobileOpen(false)}
+                  title={item.label}
+                  aria-label={item.label}
+                  className={({ isActive }) =>
+                    `flex items-center justify-center w-full p-2.5 rounded transition ${isActive ? 'bg-white/15 text-cream-50' : 'text-cream-200 hover:bg-white/10'}`
+                  }
+                >
+                  {getNavIcon(item.to)}
+                </NavLink>
+              ))}
+            </nav>
+          )}
 
           <div className="mt-auto p-3 border-t border-white/10 space-y-2">
             {!collapsed ? (
@@ -212,22 +314,22 @@ export default function PortalLayout({
 
       <div className={`flex-1 w-full transition-all duration-200 ${collapsed ? 'md:ml-20' : 'md:ml-64'}`}>
         <header className="sticky top-0 z-20 bg-cream-100/90 backdrop-blur border-b border-cream-300">
-          <div className="px-4 sm:px-8 py-4 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 min-w-0">
+          <div className="px-4 sm:px-8 py-4 min-h-[72px] flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3 min-w-0 flex-1">
               <button
                 type="button"
                 onClick={() => setMobileOpen(true)}
-                className="md:hidden inline-flex w-9 h-9 items-center justify-center rounded border border-cream-300 bg-white text-ink-900"
+                className="md:hidden flex shrink-0 w-9 h-9 items-center justify-center rounded border border-cream-300 bg-white text-ink-900 mt-0.5"
                 aria-label="Open menu"
               >
                 <MenuIcon />
               </button>
               <div className="min-w-0">
-                <h1 className="text-2xl sm:text-3xl truncate">{title}</h1>
-                {subtitle && <p className="text-sm text-ink-500 truncate">{subtitle}</p>}
+                <h1 className="text-lg sm:text-2xl leading-snug">{title}</h1>
+                {subtitle && <p className="text-xs sm:text-sm text-ink-500 leading-snug mt-0.5">{subtitle}</p>}
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 shrink-0 mt-0.5">
               <NotificationBell />
               {rightHeader && <div>{rightHeader}</div>}
             </div>

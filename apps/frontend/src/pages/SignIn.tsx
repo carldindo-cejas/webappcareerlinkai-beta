@@ -1,5 +1,5 @@
 import { useEffect, useState, FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import Logo from '../components/Logo';
 import { useAuth } from '../lib/auth';
 import { SCHOOLS } from '../data/schools';
@@ -40,6 +40,18 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
   const [busy, setBusy] = useState(false);
   const { signIn, signUp } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+
+  useEffect(() => {
+    const codeParam = searchParams.get('code');
+    if (codeParam) {
+      setMode('signup');
+      setRole('student');
+      setInviteCode(codeParam.toUpperCase());
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     setErr(null);
@@ -147,10 +159,16 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
             acceptedPolicies
           });
 
-      if (user.role === 'counselor') navigate('/portal/counselor');
-      else if (user.onboarded) navigate('/portal/student/dashboard');
-      else if (!user.basicsCompleted) navigate('/profile/basics');
-      else navigate('/start-evaluation');
+      const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
+      if (user.role === 'counselor') {
+        navigate(from?.startsWith('/portal/counselor') ? from : '/portal/counselor', { replace: true });
+      } else if (user.onboarded) {
+        navigate(from?.startsWith('/portal/student') ? from : '/portal/student/dashboard', { replace: true });
+      } else if (!user.basicsCompleted) {
+        navigate('/profile/basics');
+      } else {
+        navigate('/start-evaluation');
+      }
     } catch (e: any) {
       const message = e?.message || 'Something went wrong.';
       setErr(message);

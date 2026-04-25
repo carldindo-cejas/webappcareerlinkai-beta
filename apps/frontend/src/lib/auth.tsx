@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { api, getToken, setToken } from './api';
+import { api, ApiError, getToken, setToken } from './api';
 
 export type User = {
   id: number;
@@ -45,8 +45,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const me = await api<User>('/auth/me');
       setUser(me);
-    } catch {
-      setToken(null);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        setToken(null);
+      }
       setUser(null);
     } finally {
       setLoading(false);

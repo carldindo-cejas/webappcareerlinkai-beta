@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, Navigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { isValidJoinCode, normalizeJoinCode } from '../lib/joinCode';
@@ -65,15 +65,8 @@ export default function JoinDepartment() {
   }
 
   if (!user) {
-    return (
-      <div className="min-h-screen flex items-center justify-center px-4">
-        <div className="max-w-md w-full bg-white border border-cream-300 rounded-lg p-6 text-center">
-          <h1 className="text-2xl mb-2">Sign in to join department</h1>
-          <p className="text-ink-500 mb-5">Use your student account, then open this invitation link again.</p>
-          <Link to="/signin" className="btn btn-primary inline-block">Go to sign in</Link>
-        </div>
-      </div>
-    );
+    const normalizedCode = normalizeJoinCode(code || '');
+    return <Navigate to={`/signup?code=${encodeURIComponent(normalizedCode || code || '')}`} replace />;
   }
 
   return (
