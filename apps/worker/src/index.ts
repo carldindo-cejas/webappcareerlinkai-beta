@@ -1,11 +1,13 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { hashPassword, randomJoinCode, signToken, verifyPassword, verifyToken } from './auth';
+import { generateOpaqueToken, hashOpaqueToken, hashPassword, randomJoinCode, signToken, verifyPassword, verifyToken } from './auth';
+import { passwordResetEmail, sendEmail, verificationEmail } from './email';
 import { hollandCode, scoreRiasec, scoreScct } from './scoring';
 import { predictFromDatasetMl } from './ml/predictor';
 import { retrieveContext, runLlama, type ChatMessage, type RetrievedDoc } from './ai';
 import { seedKnowledge, SCCT_QUESTIONS } from './knowledge';
 import { buildStudentContext, renderContextForPrompt, type StudentContext } from './studentContext';
+import { clientIp, rateLimit } from './rateLimit';
 
 type Bindings = {
   DB: D1Database;
@@ -16,6 +18,10 @@ type Bindings = {
   KNOWLEDGE: VectorizeIndex;
   AI_GATEWAY_ID: string;
   NOTIFICATIONS: DurableObjectNamespace;
+  RATE_LIMITS: KVNamespace;
+  RESEND_API_KEY: string;
+  RESEND_FROM_EMAIL: string;
+  RESEND_FROM_NAME: string;
 };
 
 type Variables = {
@@ -25,6 +31,13 @@ type Variables = {
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+
+// Required at runtime — missing any of these makes the whole worker non-functional.
+const REQUIRED_ENV_VARS: (keyof Bindings)[] = ['JWT_SECRET', 'FRONTEND_ORIGIN'];
+
+function validateEnv(env: Bindings): string[] {
+  return REQUIRED_ENV_VARS.filter(key => !env[key as keyof Bindings]);
+}
 
 const REQUIRED_RIASEC_COUNT = 48;
 const REQUIRED_SCCT_COUNT = 12;
@@ -43,7 +56,8 @@ const API_ROUTE_PREFIXES = [
   '/join',
   '/student',
   '/notifications',
-  '/ws'
+  '/ws',
+  '/schools'
 ] as const;
 
 const PROFILE_SCHEMA_COLUMNS = [
@@ -65,6 +79,7 @@ let ensureProfilesSchemaPromise: Promise<void> | null = null;
 let ensureSeminarsSchemaPromise: Promise<void> | null = null;
 let ensureNotificationsSchemaPromise: Promise<void> | null = null;
 let ensureAiChatSchemaPromise: Promise<void> | null = null;
+let ensureAuthSchemaPromise: Promise<void> | null = null;
 let vectorizeReady = false;
 
 async function ensureVectorizeSeed(env: Bindings): Promise<void> {
@@ -152,6 +167,85 @@ async function ensureAiChatSchema(db: D1Database): Promise<void> {
     throw err;
   });
   return ensureAiChatSchemaPromise;
+}
+
+async function ensureAuthSchema(db: D1Database): Promise<void> {
+  if (ensureAuthSchemaPromise) return ensureAuthSchemaPromise;
+  ensureAuthSchemaPromise = (async () => {
+    // Add email_verified column to existing users tables (idempotent).
+    const userInfo = await db.prepare('PRAGMA table_info(users)').all<{ name: string }>();
+    const userCols = new Set((userInfo.results ?? []).map(r => String(r.name)));
+    if (!userCols.has('email_verified')) {
+      await db.prepare('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0').run();
+    }
+    await db.prepare(`CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at INTEGER NOT NULL,
+      used_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_hash ON password_reset_tokens(token_hash)`).run();
+    await db.prepare(`CREATE TABLE IF NOT EXISTS email_verification_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at INTEGER NOT NULL,
+      used_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_hash ON email_verification_tokens(token_hash)`).run();
+    await db.prepare(`CREATE TABLE IF NOT EXISTS refresh_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at INTEGER NOT NULL,
+      revoked_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash)`).run();
+  })().catch(err => {
+    ensureAuthSchemaPromise = null;
+    throw err;
+  });
+  return ensureAuthSchemaPromise;
+}
+
+let ensureSchoolsSchemaPromise: Promise<void> | null = null;
+async function ensureSchoolsSchema(db: D1Database): Promise<void> {
+  if (ensureSchoolsSchemaPromise) return ensureSchoolsSchemaPromise;
+  ensureSchoolsSchemaPromise = (async () => {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS schools (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    )`).run();
+    await db.prepare("INSERT OR IGNORE INTO schools (name) VALUES (?)").bind('Calape National High School').run();
+  })().catch(err => {
+    ensureSchoolsSchemaPromise = null;
+    throw err;
+  });
+  return ensureSchoolsSchemaPromise;
+}
+
+async function issueTokenPair(
+  env: Bindings,
+  u: { id: number; role: string; email: string }
+): Promise<{ accessToken: string; refreshToken: string }> {
+  const accessToken = await signToken(
+    { sub: String(u.id), role: u.role as 'student' | 'counselor', email: u.email },
+    env.JWT_SECRET
+  );
+  await ensureAuthSchema(env.DB);
+  const raw = generateOpaqueToken();
+  const hash = await hashOpaqueToken(raw);
+  const expires = Math.floor(Date.now() / 1000) + 7 * 86400;
+  await env.DB.prepare(
+    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)'
+  ).bind(u.id, hash, expires).run();
+  return { accessToken, refreshToken: raw };
 }
 
 async function pushNotification(
@@ -486,9 +580,9 @@ async function getCounselorAiReply(
 }
 
 app.use('*', (c, next) => {
-  const origin = c.env.FRONTEND_ORIGIN || 'http://localhost:5173';
+  // FRONTEND_ORIGIN is guaranteed set — validateEnv blocks requests if it's missing.
   return cors({
-    origin: [origin, 'http://localhost:5173'],
+    origin: [c.env.FRONTEND_ORIGIN],
     allowHeaders: ['Content-Type', 'Authorization'],
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true
@@ -518,8 +612,23 @@ function requireRole(role: 'student' | 'counselor') {
 // -------- Health --------
 app.get('/health', c => c.json({ ok: true, service: 'CareerLinkAI API', version: '1.0.0' }));
 
+// -------- Schools (public) --------
+app.get('/schools', async c => {
+  await ensureSchoolsSchema(c.env.DB);
+  const { results } = await c.env.DB.prepare(
+    'SELECT name FROM schools WHERE active = 1 ORDER BY name ASC'
+  ).all<{ name: string }>();
+  return c.json({ schools: (results ?? []).map(r => r.name) });
+});
+
 // -------- Auth routes --------
 app.post('/auth/signup', async c => {
+  const ip = clientIp(c.req.raw.headers);
+  const rl = await rateLimit(c.env.RATE_LIMITS, `signup:${ip}`, 1, 60);
+  if (!rl.ok) {
+    c.header('Retry-After', String(rl.retryAfter));
+    return c.json({ error: 'Too many signup attempts. Try again later.' }, 429);
+  }
   const body = await c.req.json<{
     name?: string;
     firstName?: string;
@@ -602,35 +711,75 @@ app.post('/auth/signup', async c => {
     ).bind(invitedDepartment.counselorId, inserted.id, `${combinedName} joined department ${invitedDepartment.name}.`).run();
   }
 
-  const token = await signToken({ sub: String(inserted.id), role: body.role, email: body.email.toLowerCase() }, c.env.JWT_SECRET);
+  // Strict-mode email verification: do NOT issue a JWT here. The user must verify first.
+  await ensureAuthSchema(c.env.DB);
+  const verifyToken = generateOpaqueToken();
+  const verifyHash = await hashOpaqueToken(verifyToken);
+  const verifyExpires = Math.floor(Date.now() / 1000) + 86400; // 24 hours
+  await c.env.DB.prepare(
+    'INSERT INTO email_verification_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)'
+  ).bind(inserted.id, verifyHash, verifyExpires).run();
+
+  const verifyUrl = `${c.env.FRONTEND_ORIGIN}/verify-email?token=${verifyToken}`;
+  let emailDelivered = true;
+  let testModeBlocked = false;
+  try {
+    const tpl = verificationEmail({ name: combinedName, verifyUrl });
+    const sendRes = await sendEmail(c.env, { to: body.email.toLowerCase(), ...tpl });
+    if (!sendRes.ok) {
+      emailDelivered = false;
+      testModeBlocked = sendRes.testModeBlocked;
+    }
+  } catch (err) {
+    console.error('[auth] signup verification email send failed', err);
+    emailDelivered = false;
+  }
+
   return c.json({
-    token,
-    user: { id: inserted.id, email: body.email.toLowerCase(), name: combinedName, role: body.role, onboarded: false, basicsCompleted: false }
+    verificationRequired: true,
+    email: body.email.toLowerCase(),
+    emailDelivered,
+    // Fallback: when Resend is in test mode and rejected the recipient, return the
+    // verify URL so the user (the one who just signed up in this same browser) can
+    // still complete verification. In a real production setup with a verified Resend
+    // domain, sendRes.ok will be true and verifyUrl is never returned.
+    ...(testModeBlocked ? { verifyUrl } : {})
   });
 });
 
 app.post('/auth/signin', async c => {
+  const ip = clientIp(c.req.raw.headers);
+  const rl = await rateLimit(c.env.RATE_LIMITS, `signin:${ip}`, 10, 900);
+  if (!rl.ok) {
+    c.header('Retry-After', String(rl.retryAfter));
+    return c.json({ error: 'Too many sign-in attempts. Try again in a few minutes.' }, 429);
+  }
   const body = await c.req.json<{ email: string; password: string; role: 'student' | 'counselor' }>();
   if (!body.email || !body.password) return c.json({ error: 'Missing fields' }, 400);
+  await ensureAuthSchema(c.env.DB);
   const u = await c.env.DB.prepare(
-    'SELECT id, email, name, role, password_hash, password_salt, onboarded FROM users WHERE email = ?'
+    'SELECT id, email, name, role, password_hash, password_salt, onboarded, email_verified FROM users WHERE email = ?'
   ).bind(body.email.toLowerCase()).first<{
     id: number; email: string; name: string; role: 'student' | 'counselor';
-    password_hash: string; password_salt: string; onboarded: number;
+    password_hash: string; password_salt: string; onboarded: number; email_verified: number;
   }>();
   if (!u) return c.json({ error: 'Invalid email or password.' }, 401);
-  if (u.role !== body.role) return c.json({ error: `This email is registered as a ${u.role}.` }, 403);
+  if (u.role !== body.role) return c.json({ error: 'Invalid email or password.' }, 401);
   const ok = await verifyPassword(body.password, u.password_hash, u.password_salt);
   if (!ok) return c.json({ error: 'Invalid email or password.' }, 401);
-  const token = await signToken({ sub: String(u.id), role: u.role, email: u.email }, c.env.JWT_SECRET);
+  if (!u.email_verified) {
+    return c.json({ error: 'Please verify your email to continue.', requiresVerification: true, email: u.email }, 403);
+  }
   let basicsCompleted = false;
   if (u.role === 'student') {
     await ensureProfilesSchema(c.env.DB);
     const p = await c.env.DB.prepare('SELECT basics_completed FROM profiles WHERE user_id = ?').bind(u.id).first<{ basics_completed: number }>();
     basicsCompleted = !!(p && p.basics_completed);
   }
+  const { accessToken, refreshToken } = await issueTokenPair(c.env, u);
   return c.json({
-    token,
+    token: accessToken,
+    refreshToken,
     user: { id: u.id, email: u.email, name: u.name, role: u.role, onboarded: !!u.onboarded, basicsCompleted }
   });
 });
@@ -651,9 +800,199 @@ app.put('/auth/password', auth, async c => {
   return c.json({ ok: true });
 });
 
+app.post('/auth/forgot-password', async c => {
+  const ip = clientIp(c.req.raw.headers);
+  const rl = await rateLimit(c.env.RATE_LIMITS, `forgot:${ip}`, 5, 3600);
+  if (!rl.ok) {
+    c.header('Retry-After', String(rl.retryAfter));
+    return c.json({ error: 'Too many requests. Try again later.' }, 429);
+  }
+  const body = await c.req.json<{ email?: string }>().catch(() => ({} as { email?: string }));
+  const email = (body.email || '').trim().toLowerCase();
+  // Always return ok — never reveal whether the email exists.
+  if (!email) return c.json({ ok: true });
+
+  await ensureAuthSchema(c.env.DB);
+  const u = await c.env.DB.prepare('SELECT id, name FROM users WHERE email = ?').bind(email).first<{ id: number; name: string }>();
+  if (!u) return c.json({ ok: true });
+
+  const token = generateOpaqueToken();
+  const tokenHash = await hashOpaqueToken(token);
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour
+  await c.env.DB.prepare(
+    'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)'
+  ).bind(u.id, tokenHash, expiresAt).run();
+
+  const resetUrl = `${c.env.FRONTEND_ORIGIN}/reset-password?token=${token}`;
+  let testModeBlocked = false;
+  try {
+    const tpl = passwordResetEmail({ name: u.name, resetUrl });
+    const sendRes = await sendEmail(c.env, { to: email, ...tpl });
+    if (!sendRes.ok) testModeBlocked = sendRes.testModeBlocked;
+  } catch (err) {
+    console.error('[auth] forgot-password email send failed', err);
+  }
+  return c.json({ ok: true, ...(testModeBlocked ? { resetUrl } : {}) });
+});
+
+app.post('/auth/reset-password', async c => {
+  const ip = clientIp(c.req.raw.headers);
+  const rl = await rateLimit(c.env.RATE_LIMITS, `reset:${ip}`, 10, 3600);
+  if (!rl.ok) {
+    c.header('Retry-After', String(rl.retryAfter));
+    return c.json({ error: 'Too many requests. Try again later.' }, 429);
+  }
+  const body = await c.req.json<{ token?: string; newPassword?: string }>().catch(() => ({} as { token?: string; newPassword?: string }));
+  const token = (body.token || '').trim();
+  const newPassword = (body.newPassword || '').trim();
+  if (!token || !newPassword) return c.json({ error: 'Missing fields.' }, 400);
+  if (newPassword.length < 8) return c.json({ error: 'Password must be at least 8 characters.' }, 400);
+  if (!isStrongPassword(newPassword)) {
+    return c.json({ error: 'Password must include uppercase, lowercase, number, and special character.' }, 400);
+  }
+
+  await ensureAuthSchema(c.env.DB);
+  const tokenHash = await hashOpaqueToken(token);
+  const now = Math.floor(Date.now() / 1000);
+  const row = await c.env.DB.prepare(
+    'SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = ?'
+  ).bind(tokenHash).first<{ id: number; user_id: number; expires_at: number; used_at: number | null }>();
+  if (!row || row.used_at || row.expires_at < now) {
+    return c.json({ error: 'This reset link is invalid or has expired.' }, 400);
+  }
+
+  const { hash, salt } = await hashPassword(newPassword);
+  await c.env.DB.prepare('UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?').bind(hash, salt, row.user_id).run();
+  await c.env.DB.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE id = ?').bind(now, row.id).run();
+  return c.json({ ok: true });
+});
+
+app.post('/auth/verify-email', async c => {
+  const ip = clientIp(c.req.raw.headers);
+  const rl = await rateLimit(c.env.RATE_LIMITS, `verify:${ip}`, 20, 3600);
+  if (!rl.ok) {
+    c.header('Retry-After', String(rl.retryAfter));
+    return c.json({ error: 'Too many requests. Try again later.' }, 429);
+  }
+  const body = await c.req.json<{ token?: string }>().catch(() => ({} as { token?: string }));
+  const token = (body.token || '').trim();
+  if (!token) return c.json({ error: 'Missing token.' }, 400);
+
+  await ensureAuthSchema(c.env.DB);
+  const tokenHash = await hashOpaqueToken(token);
+  const now = Math.floor(Date.now() / 1000);
+  const row = await c.env.DB.prepare(
+    'SELECT id, user_id, expires_at, used_at FROM email_verification_tokens WHERE token_hash = ?'
+  ).bind(tokenHash).first<{ id: number; user_id: number; expires_at: number; used_at: number | null }>();
+  if (!row || row.used_at || row.expires_at < now) {
+    return c.json({ error: 'This verification link is invalid or has expired.' }, 400);
+  }
+
+  await c.env.DB.prepare('UPDATE users SET email_verified = 1 WHERE id = ?').bind(row.user_id).run();
+  await c.env.DB.prepare('UPDATE email_verification_tokens SET used_at = ? WHERE id = ?').bind(now, row.id).run();
+
+  // Issue JWT so user is signed in immediately after verification.
+  const u = await c.env.DB.prepare(
+    'SELECT id, email, name, role, onboarded FROM users WHERE id = ?'
+  ).bind(row.user_id).first<{ id: number; email: string; name: string; role: 'student' | 'counselor'; onboarded: number }>();
+  if (!u) return c.json({ error: 'Account not found.' }, 404);
+
+  let basicsCompleted = false;
+  if (u.role === 'student') {
+    await ensureProfilesSchema(c.env.DB);
+    const p = await c.env.DB.prepare('SELECT basics_completed FROM profiles WHERE user_id = ?').bind(u.id).first<{ basics_completed: number }>();
+    basicsCompleted = !!(p && p.basics_completed);
+  }
+  const { accessToken, refreshToken } = await issueTokenPair(c.env, u);
+  return c.json({
+    token: accessToken,
+    refreshToken,
+    user: { id: u.id, email: u.email, name: u.name, role: u.role, onboarded: !!u.onboarded, basicsCompleted }
+  });
+});
+
+app.post('/auth/resend-verification', async c => {
+  const ip = clientIp(c.req.raw.headers);
+  const rl = await rateLimit(c.env.RATE_LIMITS, `resend:${ip}`, 5, 3600);
+  if (!rl.ok) {
+    c.header('Retry-After', String(rl.retryAfter));
+    return c.json({ error: 'Too many requests. Try again later.' }, 429);
+  }
+  const body = await c.req.json<{ email?: string }>().catch(() => ({} as { email?: string }));
+  const email = (body.email || '').trim().toLowerCase();
+  if (!email) return c.json({ ok: true });
+
+  await ensureAuthSchema(c.env.DB);
+  const u = await c.env.DB.prepare(
+    'SELECT id, name, email_verified FROM users WHERE email = ?'
+  ).bind(email).first<{ id: number; name: string; email_verified: number }>();
+  // Always return ok; never reveal whether the email exists or is already verified.
+  if (!u || u.email_verified) return c.json({ ok: true });
+
+  const verifyToken = generateOpaqueToken();
+  const verifyHash = await hashOpaqueToken(verifyToken);
+  const verifyExpires = Math.floor(Date.now() / 1000) + 86400;
+  await c.env.DB.prepare(
+    'INSERT INTO email_verification_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)'
+  ).bind(u.id, verifyHash, verifyExpires).run();
+
+  const verifyUrl = `${c.env.FRONTEND_ORIGIN}/verify-email?token=${verifyToken}`;
+  let testModeBlocked = false;
+  try {
+    const tpl = verificationEmail({ name: u.name, verifyUrl });
+    const sendRes = await sendEmail(c.env, { to: email, ...tpl });
+    if (!sendRes.ok) testModeBlocked = sendRes.testModeBlocked;
+  } catch (err) {
+    console.error('[auth] resend verification email failed', err);
+  }
+  // Same test-mode fallback as signup. We only expose verifyUrl when Resend
+  // explicitly blocked test-mode delivery — never on success or "user not found".
+  return c.json({ ok: true, ...(testModeBlocked ? { verifyUrl } : {}) });
+});
+
+app.post('/auth/refresh', async c => {
+  const body = await c.req.json<{ refreshToken?: string }>().catch(() => ({} as { refreshToken?: string }));
+  const raw = (body.refreshToken || '').trim();
+  if (!raw) return c.json({ error: 'Missing refresh token.' }, 401);
+
+  await ensureAuthSchema(c.env.DB);
+  const hash = await hashOpaqueToken(raw);
+  const now = Math.floor(Date.now() / 1000);
+  const row = await c.env.DB.prepare(
+    'SELECT id, user_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash = ?'
+  ).bind(hash).first<{ id: number; user_id: number; expires_at: number; revoked_at: number | null }>();
+
+  if (!row || row.revoked_at || row.expires_at < now) {
+    return c.json({ error: 'Invalid or expired refresh token.' }, 401);
+  }
+
+  const u = await c.env.DB.prepare(
+    'SELECT id, email, name, role FROM users WHERE id = ?'
+  ).bind(row.user_id).first<{ id: number; email: string; name: string; role: 'student' | 'counselor' }>();
+  if (!u) return c.json({ error: 'User not found.' }, 401);
+
+  // Revoke old token (rotation: each use issues a new refresh token).
+  await c.env.DB.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?').bind(now, row.id).run();
+
+  const { accessToken, refreshToken } = await issueTokenPair(c.env, u);
+  return c.json({ token: accessToken, refreshToken });
+});
+
+app.post('/auth/signout', auth, async c => {
+  const body = await c.req.json<{ refreshToken?: string }>().catch(() => ({} as { refreshToken?: string }));
+  const raw = (body.refreshToken || '').trim();
+  if (raw) {
+    const hash = await hashOpaqueToken(raw);
+    const now = Math.floor(Date.now() / 1000);
+    await ensureAuthSchema(c.env.DB);
+    await c.env.DB.prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ?').bind(now, hash).run();
+  }
+  return c.json({ ok: true });
+});
+
 app.get('/auth/me', auth, async c => {
   const id = c.get('userId');
-  const u = await c.env.DB.prepare('SELECT id, email, name, role, onboarded FROM users WHERE id = ?').bind(id).first<any>();
+  const u = await c.env.DB.prepare('SELECT id, email, name, role, onboarded, email_verified FROM users WHERE id = ?').bind(id).first<any>();
   if (!u) return c.json({ error: 'Not found' }, 404);
   let basicsCompleted = false;
   if (u.role === 'student') {
@@ -661,7 +1000,7 @@ app.get('/auth/me', auth, async c => {
     const p = await c.env.DB.prepare('SELECT basics_completed FROM profiles WHERE user_id = ?').bind(id).first<{ basics_completed: number }>();
     basicsCompleted = !!(p && p.basics_completed);
   }
-  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, onboarded: !!u.onboarded, basicsCompleted });
+  return c.json({ id: u.id, email: u.email, name: u.name, role: u.role, onboarded: !!u.onboarded, basicsCompleted, emailVerified: !!u.email_verified });
 });
 
 // -------- Student profile --------
@@ -1000,6 +1339,11 @@ app.get('/ai/sessions/:id/messages', auth, requireRole('student'), async c => {
 
 app.post('/ai/sessions/:id/chat', auth, requireRole('student'), async c => {
   const userId = c.get('userId');
+  const rl = await rateLimit(c.env.RATE_LIMITS, `aichat:${userId}`, 20, 3600);
+  if (!rl.ok) {
+    c.header('Retry-After', String(rl.retryAfter));
+    return c.json({ error: 'You have hit the hourly chat limit. Try again later.' }, 429);
+  }
   const sessionId = parseInt(c.req.param('id'), 10);
   if (!Number.isFinite(sessionId)) return c.json({ error: 'Invalid session id.' }, 400);
   await ensureAiChatSchema(c.env.DB);
@@ -1288,6 +1632,12 @@ app.post('/counselor/departments/:id/seminars', auth, requireRole('counselor'), 
 });
 
 app.post('/counselor/events/ai-draft', auth, requireRole('counselor'), async c => {
+  const userId = c.get('userId');
+  const rl = await rateLimit(c.env.RATE_LIMITS, `aidraft:${userId}`, 10, 3600);
+  if (!rl.ok) {
+    c.header('Retry-After', String(rl.retryAfter));
+    return c.json({ error: 'You have hit the hourly draft limit. Try again later.' }, 429);
+  }
   const body = await c.req.json<{ prompt?: string }>().catch(() => ({} as { prompt?: string }));
   const prompt = (body.prompt || '').trim();
   if (!prompt) return c.json({ error: 'Prompt is required.' }, 400);
@@ -1886,12 +2236,22 @@ app.notFound(async c => {
 
 app.onError((err, c) => {
   console.error(err);
-  return c.json({ error: err.message || 'Server error' }, 500);
+  return c.json({ error: 'Server error' }, 500);
 });
 
 export { NotificationDO } from './notificationDO';
 export default {
-  fetch: app.fetch,
+  async fetch(request: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
+    const missing = validateEnv(env);
+    if (missing.length > 0) {
+      console.error(`[startup] Missing required env vars: ${missing.join(', ')}`);
+      return new Response(
+        JSON.stringify({ error: 'Service misconfigured. Contact the administrator.' }),
+        { status: 503, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return app.fetch(request, env, ctx);
+  },
   async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     ctx.waitUntil(seedKnowledge(env));
   }

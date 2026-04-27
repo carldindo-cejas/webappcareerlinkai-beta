@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import PortalLayout from '../components/PortalLayout';
 import { studentNavItems } from '../lib/portalNav';
-import { GENDERS, GRADE_LEVELS_SHS, SCHOOLS } from '../data/schools';
+import { GENDERS, GRADE_LEVELS_SHS, useSchools } from '../data/schools';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 
@@ -14,8 +14,19 @@ type ProfileResponse = {
 
 type Tab = 'profile' | 'password';
 
+function pwStrength(p: string): { score: number; missing: string[] } {
+  const missing: string[] = [];
+  if (p.length < 8) missing.push('8+ characters');
+  if (!/[A-Z]/.test(p)) missing.push('uppercase');
+  if (!/[a-z]/.test(p)) missing.push('lowercase');
+  if (!/[0-9]/.test(p)) missing.push('number');
+  if (!/[^A-Za-z0-9]/.test(p)) missing.push('special character');
+  return { score: 5 - missing.length, missing };
+}
+
 export default function StudentSettings() {
   const { user, refresh } = useAuth();
+  const { schools, loadingSchools } = useSchools();
   const [tab, setTab] = useState<Tab>('profile');
 
   const [school, setSchool] = useState('');
@@ -77,8 +88,9 @@ export default function StudentSettings() {
       setPasswordMsg({ tone: 'err', text: 'Fill out every field.' });
       return;
     }
-    if (newPassword.length < 8) {
-      setPasswordMsg({ tone: 'err', text: 'New password must be at least 8 characters.' });
+    const { missing } = pwStrength(newPassword);
+    if (missing.length > 0) {
+      setPasswordMsg({ tone: 'err', text: `Password needs: ${missing.join(', ')}.` });
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -138,9 +150,9 @@ export default function StudentSettings() {
                 <div className="grid sm:grid-cols-2 gap-5">
                   <div>
                     <label className="block text-[13px] font-medium mb-2">School</label>
-                    <select className="input" value={school} onChange={e => setSchool(e.target.value)}>
-                      <option value="">Choose your school</option>
-                      {SCHOOLS.map(s => <option key={s} value={s}>{s}</option>)}
+                    <select className="input" value={school} onChange={e => setSchool(e.target.value)} disabled={loadingSchools}>
+                      <option value="">{loadingSchools ? 'Loading…' : 'Choose your school'}</option>
+                      {schools.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                   </div>
                   <div>
@@ -218,7 +230,22 @@ export default function StudentSettings() {
                 onChange={e => setNewPassword(e.target.value)}
                 autoComplete="new-password"
               />
-              <p className="text-xs text-ink-500 mt-1">At least 8 characters.</p>
+              {newPassword && (() => {
+                const { score, missing } = pwStrength(newPassword);
+                const colors = ['bg-terracotta-600', 'bg-terracotta-400', 'bg-amber-400', 'bg-forest-400', 'bg-forest-700'];
+                return (
+                  <div className="mt-2 space-y-1.5">
+                    <div className="flex gap-1">
+                      {[0,1,2,3,4].map(i => (
+                        <div key={i} className={`h-1 flex-1 rounded-full transition-colors ${i < score ? colors[score - 1] : 'bg-cream-200'}`} />
+                      ))}
+                    </div>
+                    {missing.length > 0 && (
+                      <p className="text-[12px] text-ink-500">Needs: {missing.join(', ')}.</p>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
             <div>
               <label className="block text-[13px] font-medium mb-2">Confirm new password</label>

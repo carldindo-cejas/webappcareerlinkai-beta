@@ -4,6 +4,7 @@ import PortalLayout from '../components/PortalLayout';
 import { studentNavItems } from '../lib/portalNav';
 import { ApiError, api } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { useToast } from '../lib/toast';
 
 type ProfileResponse = {
   strand?: string | null;
@@ -48,6 +49,7 @@ function bestSubjectFromGrades(grades: ProfileResponse['grades']): { subject: st
 
 export default function StudentDashboard() {
   const { user } = useAuth();
+  const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<ProfileResponse | null>(null);
   const [results, setResults] = useState<ResultSummary | null>(null);
@@ -63,13 +65,26 @@ export default function StudentDashboard() {
   useEffect(() => {
     async function load() {
       setLoading(true);
+      let loadFailed = false;
       try {
         const [profileRes, riasecRes, scctRes, resultsRes] = await Promise.all([
-          api<ProfileResponse>('/profile').catch(() => null),
-          api<{ answers: Record<string, number> }>('/assessment/riasec').catch(() => ({ answers: {} })),
-          api<{ answers: Record<string, number> }>('/assessment/scct').catch(() => ({ answers: {} })),
+          api<ProfileResponse>('/profile').catch(() => {
+            loadFailed = true;
+            return null;
+          }),
+          api<{ answers: Record<string, number> }>('/assessment/riasec').catch(() => {
+            loadFailed = true;
+            return { answers: {} };
+          }),
+          api<{ answers: Record<string, number> }>('/assessment/scct').catch(() => {
+            loadFailed = true;
+            return { answers: {} };
+          }),
           api<ResultSummary>('/results').catch((err: unknown) => {
-            if (err instanceof ApiError && err.status === 400) return null;
+            // 400 just means results aren't computed yet — that's expected, not an error.
+            if (!(err instanceof ApiError) || err.status !== 400) {
+              loadFailed = true;
+            }
             return null;
           })
         ]);
@@ -77,12 +92,15 @@ export default function StudentDashboard() {
         setRiasecAnswered(Object.keys(riasecRes.answers || {}).length);
         setScctAnswered(Object.keys(scctRes.answers || {}).length);
         setResults(resultsRes);
+        if (loadFailed) {
+          showToast('error', 'Some dashboard data failed to load. Try refreshing.');
+        }
       } finally {
         setLoading(false);
       }
     }
     load();
-  }, []);
+  }, [showToast]);
 
   const bestSubject = useMemo(() => bestSubjectFromGrades(profile?.grades), [profile]);
   const hasBasicsStep = Boolean(profile?.basicsCompleted || user?.basicsCompleted);

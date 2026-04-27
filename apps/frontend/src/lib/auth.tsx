@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { api, ApiError, getToken, setToken } from './api';
+import { api, ApiError, getToken, setToken, setRefreshToken, getRefreshToken } from './api';
 
 export type User = {
   id: number;
@@ -8,6 +8,7 @@ export type User = {
   role: 'student' | 'counselor';
   onboarded: boolean;
   basicsCompleted?: boolean;
+  emailVerified?: boolean;
 };
 
 export type SignUpPayload = {
@@ -21,11 +22,18 @@ export type SignUpPayload = {
   acceptedPolicies: boolean;
 };
 
+export type SignUpResult = {
+  verificationRequired: true;
+  email: string;
+  emailDelivered?: boolean;
+  verifyUrl?: string;
+};
+
 type AuthCtx = {
   user: User | null;
   loading: boolean;
   signIn: (email: string, password: string, role: 'student' | 'counselor') => Promise<User>;
-  signUp: (payload: SignUpPayload) => Promise<User>;
+  signUp: (payload: SignUpPayload) => Promise<SignUpResult>;
   signOut: () => void;
   refresh: () => Promise<void>;
 };
@@ -60,18 +68,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   async function signIn(email: string, password: string, role: 'student' | 'counselor') {
-    const { token, user } = await api<{ token: string; user: User }>('/auth/signin', {
+    const { token, refreshToken, user } = await api<{ token: string; refreshToken: string; user: User }>('/auth/signin', {
       method: 'POST',
       body: JSON.stringify({ email, password, role })
     });
     setToken(token);
+    setRefreshToken(refreshToken);
     setUser(user);
     return user;
   }
 
-  async function signUp(payload: SignUpPayload) {
+  async function signUp(payload: SignUpPayload): Promise<SignUpResult> {
     const name = `${payload.firstName} ${payload.lastName}`.trim();
-    const { token, user } = await api<{ token: string; user: User }>('/auth/signup', {
+    const res = await api<SignUpResult>('/auth/signup', {
       method: 'POST',
       body: JSON.stringify({
         name,
@@ -85,13 +94,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         role: payload.role
       })
     });
-    setToken(token);
-    setUser(user);
-    return user;
+    return res;
   }
 
   function signOut() {
+    const rt = getRefreshToken();
+    if (rt) {
+      api('/auth/signout', { method: 'POST', body: JSON.stringify({ refreshToken: rt }) }).catch(() => {});
+    }
     setToken(null);
+    setRefreshToken(null);
     setUser(null);
   }
 

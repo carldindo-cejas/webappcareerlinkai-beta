@@ -15,7 +15,7 @@ export async function signToken(payload: JwtPayload, secret: string): Promise<st
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(payload.sub)
     .setIssuedAt()
-    .setExpirationTime('30d')
+    .setExpirationTime('15m')
     .sign(encoder(secret));
 }
 
@@ -79,5 +79,22 @@ export function randomJoinCode(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(6));
   let s = '';
   for (const b of bytes) s += alphabet[b % alphabet.length];
+  return s;
+}
+
+// 32 random bytes → 64 hex chars. Used for password reset and email verification links.
+export function generateOpaqueToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let s = '';
+  for (const b of bytes) s += b.toString(16).padStart(2, '0');
+  return s;
+}
+
+// SHA-256 hex of a token. We store hashes, never raw tokens, so a DB leak is harmless.
+export async function hashOpaqueToken(token: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  const bytes = new Uint8Array(buf);
+  let s = '';
+  for (const b of bytes) s += b.toString(16).padStart(2, '0');
   return s;
 }

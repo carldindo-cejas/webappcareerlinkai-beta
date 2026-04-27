@@ -2,9 +2,10 @@ import { FormEvent, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import TopNav, { SaveStatus } from '../components/TopNav';
 import Stepper from '../components/Stepper';
-import { GENDERS, GRADE_LEVELS_SHS, SCHOOLS } from '../data/schools';
+import { GENDERS, GRADE_LEVELS_SHS, useSchools } from '../data/schools';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { useToast } from '../lib/toast';
 
 type ProfileResponse = {
   school?: string | null;
@@ -16,7 +17,9 @@ type ProfileResponse = {
 
 export default function ProfileBasics() {
   const { refresh } = useAuth();
+  const { showToast } = useToast();
   const nav = useNavigate();
+  const { schools, loadingSchools } = useSchools();
 
   const [school, setSchool] = useState('');
   const [gradeLevel, setGradeLevel] = useState('');
@@ -33,8 +36,10 @@ export default function ProfileBasics() {
       if (p.gradeLevel) setGradeLevel(p.gradeLevel);
       if (p.gender) setGender(p.gender);
       if (p.birthdate) setBirthdate(p.birthdate);
-    }).catch(() => {});
-  }, []);
+    }).catch(() => {
+      showToast('error', 'Could not load your existing profile. You can still fill it in below.');
+    });
+  }, [showToast]);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -43,6 +48,11 @@ export default function ProfileBasics() {
     if (!gradeLevel) return setErr('Please pick your grade level.');
     if (!gender) return setErr('Please pick a gender option.');
     if (!birthdate) return setErr('Please enter your birthdate.');
+    const dob = new Date(birthdate);
+    const now = new Date();
+    const ageYears = (now.getTime() - dob.getTime()) / (365.25 * 24 * 3600 * 1000);
+    if (dob >= now) return setErr('Birthdate cannot be today or in the future.');
+    if (ageYears < 10 || ageYears > 100) return setErr('Please enter a valid birthdate.');
 
     setSaving(true);
     try {
@@ -86,21 +96,21 @@ export default function ProfileBasics() {
           <div className="grid sm:grid-cols-2 gap-5">
             <div>
               <label className="block text-[13px] font-medium mb-2">School</label>
-              <select className="input" value={school} onChange={e => setSchool(e.target.value)} required>
-                <option value="">Choose your school</option>
-                {SCHOOLS.map(s => <option key={s} value={s}>{s}</option>)}
+              <select className="input" value={school} onChange={e => setSchool(e.target.value)} required aria-required="true" disabled={loadingSchools}>
+                <option value="">{loadingSchools ? 'Loading…' : 'Choose your school'}</option>
+                {schools.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-[13px] font-medium mb-2">Grade level</label>
-              <select className="input" value={gradeLevel} onChange={e => setGradeLevel(e.target.value)} required>
+              <select className="input" value={gradeLevel} onChange={e => setGradeLevel(e.target.value)} required aria-required="true">
                 <option value="">Choose grade level</option>
                 {GRADE_LEVELS_SHS.map(g => <option key={g} value={g}>Grade {g}</option>)}
               </select>
             </div>
             <div>
               <label className="block text-[13px] font-medium mb-2">Gender</label>
-              <select className="input" value={gender} onChange={e => setGender(e.target.value)} required>
+              <select className="input" value={gender} onChange={e => setGender(e.target.value)} required aria-required="true">
                 <option value="">Choose one</option>
                 {GENDERS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
               </select>
@@ -111,8 +121,10 @@ export default function ProfileBasics() {
                 type="date"
                 className="input"
                 value={birthdate}
+                max={new Date().toISOString().slice(0, 10)}
                 onChange={e => setBirthdate(e.target.value)}
                 required
+                aria-required="true"
               />
             </div>
           </div>

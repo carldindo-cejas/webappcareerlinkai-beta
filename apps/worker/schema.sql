@@ -10,7 +10,26 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK (role IN ('student', 'counselor')),
   password_hash TEXT NOT NULL,
   password_salt TEXT NOT NULL,
+  email_verified INTEGER NOT NULL DEFAULT 0,
   onboarded INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -118,7 +137,17 @@ CREATE TABLE IF NOT EXISTS seminar_invites (
   UNIQUE (seminar_id, student_id)
 );
 
+CREATE TABLE IF NOT EXISTS schools (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+INSERT OR IGNORE INTO schools (name) VALUES ('Calape National High School');
+
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_hash ON password_reset_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_hash ON email_verification_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_departments_counselor ON departments(counselor_id);
 CREATE INDEX IF NOT EXISTS idx_departments_join_code ON departments(join_code);
 CREATE INDEX IF NOT EXISTS idx_department_members_student ON department_members(student_id);

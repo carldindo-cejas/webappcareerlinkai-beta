@@ -3,8 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import TopNav, { SaveStatus } from '../components/TopNav';
 import { SCCT_ITEMS, SCCT_OPTIONS, CONSTRUCT_META, ScctConstruct } from '../data/scct';
 import { api } from '../lib/api';
+import { useToast } from '../lib/toast';
 
 export default function ScctAssessment() {
+  const { showToast } = useToast();
   const [answers, setAnswers] = useState<Record<number, number>>({});
   const [idx, setIdx] = useState(0);
   const [submitting, setSubmitting] = useState(false);
@@ -20,8 +22,10 @@ export default function ScctAssessment() {
         const firstUnanswered = SCCT_ITEMS.findIndex(q => !(q.id in r.answers));
         if (firstUnanswered >= 0) setIdx(firstUnanswered);
       }
-    }).catch(() => {});
-  }, []);
+    }).catch(() => {
+      showToast('error', 'Could not load your previous answers. Starting fresh.');
+    });
+  }, [showToast]);
 
   const constructs: ScctConstruct[] = ['self_efficacy', 'outcome_expectations', 'perceived_barriers'];
   const meta = CONSTRUCT_META[item.construct];
@@ -36,6 +40,11 @@ export default function ScctAssessment() {
   async function next() {
     if (idx < total - 1) {
       setIdx(idx + 1);
+      return;
+    }
+    const unanswered = SCCT_ITEMS.filter(q => !(q.id in answers)).length;
+    if (unanswered > 0) {
+      setErr(`${unanswered} question${unanswered > 1 ? 's' : ''} still need${unanswered === 1 ? 's' : ''} an answer. Use the "Previous" button to go back.`);
       return;
     }
     setErr(null);
@@ -56,7 +65,7 @@ export default function ScctAssessment() {
 
   return (
     <div className="min-h-screen">
-      <TopNav sticky right={<div className="flex items-center gap-4 sm:gap-6"><SaveStatus /><a href="#" onClick={e => { e.preventDefault(); nav('/'); }} className="text-sm text-ink-500 hover:text-ink-900">Save & exit</a></div>} />
+      <TopNav sticky right={<div className="flex items-center gap-4 sm:gap-6"><SaveStatus /><button type="button" onClick={() => nav('/')} className="text-sm text-ink-500 hover:text-ink-900">Save &amp; exit</button></div>} />
 
       <div className="bg-cream-50 border-b border-cream-300 px-4 sm:px-8 py-5">
         <div className="max-w-[1200px] mx-auto flex flex-wrap items-center gap-4 sm:gap-8">

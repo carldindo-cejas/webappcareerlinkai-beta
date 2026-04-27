@@ -1,416 +1,510 @@
 # CareerLinkAI
 
-Senior-high career guidance platform built on the RIASEC and Social Cognitive Career Theory (SCCT) frameworks, with a Cloudflare-native AI counselor.
+CareerLinkAI is a senior-high school career guidance platform grounded in the **RIASEC** (Holland) and **SCCT** (Social Cognitive Career Theory) frameworks. It combines psychometric assessment, an ML-backed recommendation engine, and an AI counselor to help students identify aligned SHS strands, college courses, and career paths — while giving school counselors a dashboard to manage departments, seminars, and student progress.
 
-## Stack
+---
 
-- **Frontend:** React 18 + Vite + TypeScript + TailwindCSS + React Router
-- **Backend:** Cloudflare Workers (Hono) + D1 (SQLite) + Durable Objects + JWT (jose HS256)
-- **AI/Knowledge:** Cloudflare Workers AI (Llama 3.1 8B) + Vectorize (768-dim embeddings) + AI Gateway
-- **Deployment:** Cloudflare Workers assets + GitHub Actions Linux CI
+## Table of Contents
 
-## Repository Layout
+- [Project Overview](#project-overview)
+- [Tech Stack](#tech-stack)
+- [Repository Structure](#repository-structure)
+- [Features](#features)
+  - [Student Portal](#student-portal)
+  - [Counselor Portal](#counselor-portal)
+  - [AI Counselor](#ai-counselor)
+  - [Authentication and Email](#authentication-and-email)
+  - [Real-time Notifications](#real-time-notifications)
+- [Assessment Engine](#assessment-engine)
+- [Scoring and Recommendation Engine](#scoring-and-recommendation-engine)
+- [ML Predictor](#ml-predictor)
+- [Data Model](#data-model)
+- [API Reference](#api-reference)
+- [Cloudflare Configuration](#cloudflare-configuration)
+- [Local Development](#local-development)
+- [Commands](#commands)
+- [Deployment](#deployment)
+- [Environment Variables and Secrets](#environment-variables-and-secrets)
+- [Troubleshooting](#troubleshooting)
 
-```text
+---
+
+## Project Overview
+
+CareerLinkAI is a monorepo containing:
+
+| Package | Description |
+|---|---|
+| `apps/frontend` | React + Vite + TypeScript SPA — student and counselor portal |
+| `apps/worker` | Hono API on Cloudflare Workers — REST, AI, real-time notifications |
+| `apps/predictor` | Python prototype artifacts (offline research, not deployed) |
+
+The frontend is built as a static bundle and served as Worker Assets, so the single Cloudflare Worker serves both the API and the UI.
+
+**Live production URL:** `https://careerlinkai.online`
+**Worker API URL:** `https://careerlinkai.cejascarldindo.workers.dev`
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite 4, TypeScript, TailwindCSS, React Router v6 |
+| Backend | Cloudflare Workers, Hono v4, TypeScript |
+| Database | Cloudflare D1 (SQLite-compatible, serverless) |
+| Rate limiting | Cloudflare KV |
+| Real-time | Cloudflare Durable Objects + WebSocket |
+| AI / RAG | Cloudflare Workers AI (LLaMA), Vectorize (cosine similarity) |
+| AI Gateway | Cloudflare AI Gateway (request logging + caching) |
+| Email | Resend API (transactional email — verification, password reset) |
+| CI/CD | GitHub Actions (ubuntu-latest) + Wrangler Action |
+
+---
+
+## Repository Structure
+
+```
 webappcareerlinkai-beta/
 ├── apps/
-│   ├── frontend/                     # React + Vite + TailwindCSS app
+│   ├── frontend/
+│   │   └── src/
+│   │       ├── components/      # Shared UI — Logo, TopNav, Charts, Stepper
+│   │       ├── data/            # Static data — riasec.ts, scct.ts, strands.ts, schools.ts
+│   │       ├── lib/             # API client (api.ts), auth context (auth.tsx), toast, joinCode
+│   │       └── pages/           # All route pages (see Routes below)
+│   ├── worker/
 │   │   ├── src/
-│   │   │   ├── pages/                # Student & counselor page routes
-│   │   │   ├── components/           # Shared React components
-│   │   │   ├── lib/                  # Auth, API client, routing config
-│   │   │   ├── data/                 # Static data: strands, RIASEC, SCCT, schools
-│   │   │   ├── App.tsx               # Main router
-│   │   │   └── index.css             # Global TailwindCSS + theme
-│   │   └── vite.config.ts            # Build config
-│   ├── worker/                       # Cloudflare Worker + AI + Knowledge
-│   │   ├── src/
-│   │   │   ├── index.ts              # Main API routes & handlers
-│   │   │   ├── auth.ts               # JWT signing, password hashing
-│   │   │   ├── scoring.ts            # RIASEC & SCCT scoring logic
-│   │   │   ├── ai.ts                 # Workers AI wrapper (embed, retrieve, LLM)
-│   │   │   ├── knowledge.ts          # Knowledge corpus builder for Vectorize
-│   │   │   ├── notificationDO.ts     # Durable Object for real-time notifications
-│   │   │   └── ml/
-│   │   │       ├── predictor.ts      # Course/career matching ML predictor
-│   │   │       └── predictorMap.ts   # Course/career label metadata
-│   │   ├── schema.sql                # D1 SQLite schema (profiles, assessments, etc.)
-│   │   ├── wrangler.toml             # Cloudflare config: AI, Vectorize, D1, cron
-│   │   └── package.json
-│   └── predictor/                    # Python prototype assets (legacy)
-├── .github/workflows/
-│   └── deploy-worker.yml             # CI/CD: builds frontend, deploys worker
-├── CLAUDE.md                         # Developer guide & token-saving tips
-└── README.md (this file)
+│   │   │   ├── index.ts         # Hono app — all routes wired here
+│   │   │   ├── auth.ts          # JWT sign/verify, password hashing, token generation
+│   │   │   ├── scoring.ts       # RIASEC scoring, Holland code, recommendation engine
+│   │   │   ├── ml/
+│   │   │   │   ├── predictor.ts     # In-Worker ML inference (kNN-based)
+│   │   │   │   └── predictorMap.ts  # Base64-encoded model data
+│   │   │   ├── ai.ts            # Vectorize retrieval + LLaMA chat
+│   │   │   ├── knowledge.ts     # RAG knowledge seeding (SCCT concepts)
+│   │   │   ├── studentContext.ts # Builds per-student prompt context
+│   │   │   ├── email.ts         # Resend email sender + HTML templates
+│   │   │   ├── rateLimit.ts     # KV-backed token bucket rate limiter
+│   │   │   └── careerLookup.ts  # Career data helpers
+│   │   ├── schema.sql           # D1 schema (safe to re-run — IF NOT EXISTS)
+│   │   ├── wrangler.toml        # Cloudflare Worker config
+│   │   └── migrations/          # Incremental D1 migrations
+│   └── predictor/               # Python prototype (offline research only)
+├── .github/
+│   └── workflows/
+│       └── deploy-worker.yml    # CI: test → build frontend → deploy Worker
+├── CLAUDE.md                    # AI assistant operating guide
+└── README.md
 ```
 
 ---
 
-## Where to Find Each Feature
+## Features
 
-### Student Pages
-- **Landing & Auth:** [`apps/frontend/src/pages/Landing.tsx`](apps/frontend/src/pages/Landing.tsx), [`SignIn.tsx`](apps/frontend/src/pages/SignIn.tsx)
-- **Onboarding (profile basics):** [`Onboarding.tsx`](apps/frontend/src/pages/Onboarding.tsx), [`ProfileBasics.tsx`](apps/frontend/src/pages/ProfileBasics.tsx)
-- **RIASEC assessment:** [`RiasecAssessment.tsx`](apps/frontend/src/pages/RiasecAssessment.tsx) → backend route `/assessment/riasec`
-- **SCCT assessment:** [`ScctAssessment.tsx`](apps/frontend/src/pages/ScctAssessment.tsx) → backend route `/assessment/scct`
-- **Results & recommendations:** [`StudentResults.tsx`](apps/frontend/src/pages/StudentResults.tsx) → backend route `/results`
-- **Dashboard:** [`StudentDashboard.tsx`](apps/frontend/src/pages/StudentDashboard.tsx) (progress, chat preview)
-- **AI Counselor (multi-turn chat):** [`StudentAICounselor.tsx`](apps/frontend/src/pages/StudentAICounselor.tsx) → backend routes `/ai/sessions`, `/ai/sessions/:id/chat`
-- **Student activity feed:** [`StudentActivity.tsx`](apps/frontend/src/pages/StudentActivity.tsx) → backend route `/student/activity`
-- **Settings:** [`StudentSettings.tsx`](apps/frontend/src/pages/StudentSettings.tsx) (password, profile)
-- **Department enrollment:** [`StudentDepartments.tsx`](apps/frontend/src/pages/StudentDepartments.tsx), [`JoinDepartment.tsx`](apps/frontend/src/pages/JoinDepartment.tsx)
+### Student Portal
 
-### Counselor Pages
-- **Dashboard:** [`CounselorDashboard.tsx`](apps/frontend/src/pages/CounselorDashboard.tsx)
-- **Departments:** [`CounselorDepartments.tsx`](apps/frontend/src/pages/CounselorDepartments.tsx) (create, list), [`DepartmentDetail.tsx`](apps/frontend/src/pages/DepartmentDetail.tsx) (roster, seminars)
-- **Student detail:** [`CounselorStudentDetail.tsx`](apps/frontend/src/pages/CounselorStudentDetail.tsx) → backend route `/counselor/students/:id/results`
-- **Activity feed:** [`CounselorActivity.tsx`](apps/frontend/src/pages/CounselorActivity.tsx) → backend route `/counselor/activity`
-- **Settings:** [`CounselorSettings.tsx`](apps/frontend/src/pages/CounselorSettings.tsx) (profile, password)
-- **Analytics (seminars, invitations):** [`CounselorAnalytics.tsx`](apps/frontend/src/pages/CounselorAnalytics.tsx)
+| Route | Page | Description |
+|---|---|---|
+| `/` | Landing | Public marketing page with how-it-works, research, and counselor sections |
+| `/signup` | Sign Up | Account creation (name, email, password, role) |
+| `/signin` | Sign In | Email + password login |
+| `/verify-email` | Email Verification | Token-based email confirmation |
+| `/check-your-email` | Check Email | Post-signup nudge to verify inbox |
+| `/forgot-password` | Forgot Password | Sends password reset link |
+| `/reset-password` | Reset Password | Token-gated password change |
+| `/onboarding` | Onboarding | Post-signup guided onboarding flow |
+| `/profile/basics` | Profile Basics | School, grade level, strand, GWA, subject grades, guardian info |
+| `/start-evaluation` | Start Evaluation | Intro page before assessments |
+| `/assessment/riasec` | RIASEC Assessment | 48-question Likert assessment |
+| `/assessment/scct` | SCCT Assessment | 12-question Likert assessment |
+| `/portal/student/dashboard` | Student Dashboard | Results summary, course/career matches, seminar invitations |
+| `/portal/student/result` | Student Results | Full RIASEC radar, SCCT scores, top courses and careers with match % |
+| `/portal/student/departments` | Departments | Joined departments, pending invitations |
+| `/portal/student/activity` | Activity | Student-scoped activity feed |
+| `/portal/student/ai-counselor` | AI Counselor | Persistent AI chat sessions with context-aware career guidance |
+| `/portal/student/settings` | Settings | Account info, password change, AI external consent |
+| `/join/:code` | Join Department | Join a department via 6-character code |
 
-### Data & Config
-- **RIASEC items & labels:** [`apps/frontend/src/data/riasec.ts`](apps/frontend/src/data/riasec.ts) (48 items, 6 dimensions)
-- **SCCT constructs:** [`apps/frontend/src/data/scct.ts`](apps/frontend/src/data/scct.ts) (12 items, 3 constructs)
-- **Senior-high strands:** [`apps/frontend/src/data/strands.ts`](apps/frontend/src/data/strands.ts) (STEM, ABM, HUMSS, ICT, HE)
-- **School list:** [`apps/frontend/src/data/schools.ts`](apps/frontend/src/data/schools.ts)
+### Counselor Portal
 
-### Shared Components
-- **Layout:** [`PortalLayout.tsx`](apps/frontend/src/components/PortalLayout.tsx) (sidebar nav, header)
-- **Charts:** [`RadarChart.tsx`](apps/frontend/src/components/RadarChart.tsx) (RIASEC visualization), [`BarChart.tsx`](apps/frontend/src/components/charts/BarChart.tsx)
-- **Navigation:** [`portalNav.ts`](apps/frontend/src/lib/portalNav.ts) (student/counselor menu items)
-- **Notifications:** [`NotificationBell.tsx`](apps/frontend/src/components/NotificationBell.tsx), [`NotificationContext.tsx`](apps/frontend/src/lib/NotificationContext.tsx)
+| Route | Page | Description |
+|---|---|---|
+| `/portal/counselor` | Counselor Dashboard | Overview stats, student roster, recent activity |
+| `/portal/counselor/departments` | Departments | Create/manage departments, generate join codes |
+| `/portal/counselor/departments/:id` | Department Detail | Members list, seminars, invitations for a specific department |
+| `/portal/counselor/analytics` | Analytics | Heatmaps and bar charts for strand/Holland code distribution across students |
+| `/portal/counselor/activity` | Activity / Events | Seminar management — create, schedule, invite students |
+| `/portal/counselor/students/:id` | Student Detail | View a specific student's full assessment results and profile |
+| `/portal/counselor/settings` | Counselor Settings | Profile management, school/contact info |
 
-### Authentication & API
-- **Auth context & hooks:** [`apps/frontend/src/lib/auth.tsx`](apps/frontend/src/lib/auth.tsx) (JWT storage, login state)
-- **API client:** [`apps/frontend/src/lib/api.ts`](apps/frontend/src/lib/api.ts) (HTTP wrapper with auth headers)
-- **Backend auth utilities:** [`apps/worker/src/auth.ts`](apps/worker/src/auth.ts) (JWT sign/verify, password hash)
+### AI Counselor
 
-### Scoring & Matching
-- **RIASEC & SCCT scoring:** [`apps/worker/src/scoring.ts`](apps/worker/src/scoring.ts) (dimension averages, Holland code)
-- **Course/career matching:** [`apps/worker/src/ml/predictor.ts`](apps/worker/src/ml/predictor.ts) (dot product matching)
-- **Career metadata:** [`apps/worker/src/ml/predictorMap.ts`](apps/worker/src/ml/predictorMap.ts) (course/career labels, descriptions)
+- **RAG (Retrieval-Augmented Generation):** Knowledge base seeded into Cloudflare Vectorize with SCCT concepts (self-efficacy, outcome expectations, perceived barriers). Retrieved via cosine similarity on LLaMA 3 embeddings.
+- **Context-aware:** Each request builds a structured `StudentContext` — strand, GWA, Holland code, top courses/careers, SCCT scores — injected into the system prompt so the AI always knows who it's talking to.
+- **Persistent sessions:** Chat history is stored per session in `ai_chat_sessions` and `ai_chat_messages`. Students can create multiple named sessions.
+- **Model:** `@cf/meta/llama-3.1-8b-instruct` via Cloudflare Workers AI, routed through AI Gateway for observability.
+- **Consent gate:** AI external processing requires explicit student consent (`ai_external_consent`), stored on the profile.
 
-### AI & Knowledge Base
-- **Workers AI wrapper:** [`apps/worker/src/ai.ts`](apps/worker/src/ai.ts)
-  - `embed()` — embed text to 768-dim vector using baai/bge-base-en-v1.5
-  - `embedBatch()` — batch embed for efficiency
-  - `retrieveContext()` — retrieve top-4 relevant docs from Vectorize
-  - `runLlama()` — call Llama 3.1 8B with AI Gateway logging
-- **Knowledge corpus:** [`apps/worker/src/knowledge.ts`](apps/worker/src/knowledge.ts)
-  - `buildKnowledgeCorpus()` — generates ~101 vectors from strands, RIASEC, SCCT, courses, careers
-  - `seedKnowledge()` — batch embeds and upserts into Vectorize index
-  - Add new knowledge by extending the arrays or appending docs
+### Authentication and Email
 
-### API Routes
-- **Main handler:** [`apps/worker/src/index.ts`](apps/worker/src/index.ts) (all routes defined here)
-- **AI explain (one-off):** `POST /ai/explain` — explains a result or question
-- **AI Counselor (multi-turn):** `POST /ai/sessions/:id/chat` — persisted chat with student context
-- **Vectorize seeding:** `POST /admin/seed-knowledge` (counselor auth) — manually trigger knowledge embedding
-- **Auto-seeding:** Runs automatically on first AI request + daily at 2 AM UTC via cron
-
-### Database
-- **Schema:** [`apps/worker/schema.sql`](apps/worker/schema.sql)
-  - Users, profiles, assessments (riasec, scct), results
-  - Departments, seminars, notifications, system_config
-  - AI chat sessions & messages
-- **Queries:** All in [`apps/worker/src/index.ts`](apps/worker/src/index.ts) routes (D1 prepared statements)
+- **JWT access tokens** (short-lived) + **opaque refresh tokens** (7-day, stored hashed in D1).
+- **Email verification** — required before accessing the portal. Token is hashed (SHA-256) before storage; plain token is emailed via Resend.
+- **Password reset** — time-limited (1-hour) hashed token, single-use.
+- **Strong password** policy enforced server-side: ≥8 chars, uppercase, lowercase, digit, special character.
+- **Email provider:** Resend API (`https://api.resend.com/emails`) — raw `fetch`, no SDK dependency.
+- **From address:** `noreply@careerlinkai.online`
 
 ### Real-time Notifications
-- **Durable Object:** [`apps/worker/src/notificationDO.ts`](apps/worker/src/notificationDO.ts) (WebSocket broadcasting)
-- **Frontend listener:** [`NotificationContext.tsx`](apps/frontend/src/lib/NotificationContext.tsx)
+
+- Each user has a dedicated **Durable Object** (`NotificationDO`) keyed by user ID.
+- Students connect via WebSocket at `/ws/notifications`.
+- When the Worker writes a notification to D1 (e.g., seminar invite, join approval), it pushes the payload to the user's DO.
+- The DO fans the message to all live WebSocket connections for that user.
+- REST fallback: `GET /notifications` returns unread notifications; `POST /notifications/read-all` marks all read.
 
 ---
 
-## API Surface
+## Assessment Engine
 
-All endpoints are JSON. Authenticated routes require `Authorization: Bearer <jwt>`.
+### RIASEC (Holland Codes)
 
-| Method | Path | Role | Purpose |
-|--------|------|------|---------|
-| **Auth** |||
-| POST | `/auth/signup` | public | Create user, returns JWT |
-| POST | `/auth/signin` | public | Sign in, returns JWT |
-| POST | `/auth/password` | student/counselor | Change password |
-| GET | `/auth/me` | any | Get current user (id, name, email, role) |
-| **Student Profile** |||
-| GET | `/profile` | student | Read profile (school, strand, grades, etc.) |
-| PUT | `/profile` | student | Update profile |
-| **Assessments** |||
-| GET/PUT | `/assessment/riasec` | student | RIASEC answers (autosave per session) |
-| POST | `/assessment/riasec/submit` | student | Mark RIASEC complete, generate Holland code |
-| GET/PUT | `/assessment/scct` | student | SCCT answers (autosave per session) |
-| POST | `/assessment/scct/submit` | student | Score SCCT, compute final results |
-| **Results** |||
-| GET | `/results` | student | Holland code, RIASEC, SCCT, courses, careers |
-| **AI (Always Enabled)** |||
-| POST | `/ai/explain` | student | One-off explanation of recommendations (uses RAG) |
-| GET | `/ai/sessions` | student | List chat sessions |
-| POST | `/ai/sessions` | student | Create new chat session |
-| POST | `/ai/sessions/:id/chat` | student | Send message, get reply (uses RAG, persisted) |
-| POST | `/admin/seed-knowledge` | counselor | Embed & upsert knowledge corpus to Vectorize |
-| **Invitations & Activities** |||
-| GET | `/student/invitations` | student | List seminar invitations |
-| POST | `/student/invitations/:id/respond` | student | Accept/decline invitation |
-| POST | `/join/:code` | student | Join department using 6-char code |
-| GET | `/student/activity` | student | Personal activity feed |
-| GET | `/counselor/activity` | counselor | Counselor-wide activity feed |
-| **Counselor Departments** |||
-| GET | `/counselor/departments` | counselor | List counselor's departments |
-| POST | `/counselor/departments` | counselor | Create department (name, strand) |
-| GET | `/counselor/departments/:id` | counselor | Dept detail + student roster |
-| POST | `/counselor/departments/:id/seminars` | counselor | Create seminar & invite department |
-| **Counselor Student View** |||
-| GET | `/counselor/students/:id/results` | counselor | View student's full profile & results |
+- **48 questions** — 8 per dimension, in order: **R**ealistic, **I**nvestigative, **A**rtistic, **S**ocial, **E**nterprising, **C**onventional.
+- Each answer is a Likert scale 1–5 (Strongly Disagree → Strongly Agree).
+- Score per dimension = average of 8 answers.
+- **Holland Code** = top 3 dimensions by score, concatenated (e.g. `ISA`).
+
+### SCCT (Social Cognitive Career Theory)
+
+- **12 questions** — 3 subscales of 4 questions each:
+  - Questions 1–4: **Self-Efficacy** — confidence in career-related tasks
+  - Questions 5–8: **Outcome Expectations** — belief that effort leads to good outcomes
+  - Questions 9–12: **Perceived Barriers** — obstacles that may limit career pursuit
+- Score per subscale = average of 4 answers.
+
+Both assessments use the same 1–5 Likert response scale. Answers are saved per question in `riasec_answers` and `scct_answers` and can be updated before final submission.
 
 ---
 
-## Commands
+## Scoring and Recommendation Engine
 
-### Install & Setup
+`apps/worker/src/scoring.ts`
 
-```bash
-# Install all dependencies (frontend + worker)
-npm run install:all
+**Course and career catalog** — 10 courses and 10 careers, each with a RIASEC dimension weight profile (maximum 5 per dimension).
 
-# Initialize remote D1 database (one-time)
-npm run db:init
+**Match score** = weighted dot product of student RIASEC scores against the item profile, normalised to 0–100.
 
-# Check Wrangler authentication
-npx wrangler whoami
-```
+**Strand boost** — additional points applied if the student's SHS strand aligns with the item:
 
-### Development
+| Strand | Boosted dimensions |
+|---|---|
+| STEM | I, R (+2) |
+| ABM | E, C (+2) |
+| HUMSS | S, A (+2) |
+| ARTS | A (+3) |
+| TVL | R (+2) |
 
-```bash
-# Terminal A: Worker (http://localhost:8787)
-npm run dev:worker
+Top 6 courses and top 6 careers are returned, capped at 99% match.
 
-# Terminal B: Frontend (http://localhost:5173, calls localhost:8787 API)
-npm run dev:frontend
-```
+**Course catalog** (current): BS Computer Science, BS Architecture, BS Industrial Design, BS Psychology, BS Business Administration, BS Accountancy, BS Nursing, BS Mechanical Engineering, BS Multimedia Arts, AB Political Science.
 
-### Production Build & Deploy
+**Career catalog** (current): Software Engineer, UX/Product Designer, Architect, Clinical Psychologist, Entrepreneur/Founder, Data Analyst, Teacher/Educator, Mechanical Engineer, Marketing Manager, Accountant/Auditor.
 
-```bash
-# Build frontend production bundle
-npm run build
+---
 
-# Deploy Worker + assets to Cloudflare
-npm run deploy:worker
-```
+## ML Predictor
+
+`apps/worker/src/ml/predictor.ts`
+
+An in-Worker kNN-inspired predictor using a pre-encoded model baked into `predictorMap.ts` as Base64 binary arrays. No external API call — purely in-process inference.
+
+**Inputs:**
+- SHS strand (encoded as integer index)
+- Subject grades: Math, English, Science for grades 7–10 (Likert-clamped)
+- RIASEC scores per dimension
+- SCCT subscale scores (self-efficacy, outcome expectations, perceived barriers)
+
+**Outputs:**
+- Best predicted career, best course, best subject area
+- Predicted Holland code
+- Predicted SHS strand
+- SCCT summary
+- Ranked course and career lists with match % and rationale
+
+The predictor merges with the scoring engine output and is surfaced alongside the rule-based recommendations.
+
+---
+
+## Data Model
+
+`apps/worker/schema.sql`
+
+| Table | Purpose |
+|---|---|
+| `users` | All accounts — email, name, role (`student`/`counselor`), password hash + salt, `email_verified`, `onboarded` |
+| `profiles` | Student profile — strand, GWA, grades JSON, school, grade level, gender, birthdate, contact, guardian, `basics_completed`, AI consent |
+| `riasec_answers` | Per-question RIASEC responses (1–5), keyed `(user_id, question_id)` |
+| `scct_answers` | Per-question SCCT responses (1–5), keyed `(user_id, question_id)` |
+| `results` | Final computed results — Holland code, RIASEC JSON, SCCT JSON, courses JSON, careers JSON |
+| `departments` | Counselor-owned groups — name, strand, unique 6-char join code |
+| `department_members` | Student ↔ department membership |
+| `seminars` | Events attached to a department — title, description, venue, scheduled time |
+| `seminar_invites` | Per-student invite with status `pending`/`accepted`/`declined` |
+| `activity` | Counselor activity feed entries |
+| `schools` | Active school list (seeded: Calape National High School) |
+| `password_reset_tokens` | Hashed, time-limited reset tokens |
+| `email_verification_tokens` | Hashed, time-limited verification tokens |
+| `refresh_tokens` | Hashed opaque refresh tokens (7-day) |
+| `notifications` | Persistent notification records per user |
+| `ai_chat_sessions` | AI chat session metadata per student |
+| `ai_chat_messages` | Chat message history per session (`user`/`assistant`) |
+| `system_config` | Key-value store for runtime flags (e.g. `vectorize_seeded`) |
+
+Runtime tables (`notifications`, `ai_chat_*`, `refresh_tokens`, `system_config`) are created lazily by `ensureXSchema()` helpers in the Worker on first use.
+
+---
+
+## API Reference
+
+All routes are defined in `apps/worker/src/index.ts`.
+
+### Health
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Liveness check — returns `{ ok: true, ts }` |
+
+### Auth
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/auth/signup` | — | Register (name, email, password, role) |
+| POST | `/auth/signin` | — | Sign in; returns `accessToken` + `refreshToken` |
+| POST | `/auth/refresh` | Refresh token | Issue new access + refresh token pair |
+| POST | `/auth/signout` | Bearer | Revoke refresh token |
+| GET | `/auth/me` | Bearer | Current user info |
+| POST | `/auth/verify-email` | — | Verify email with token from link |
+| POST | `/auth/resend-verification` | — | Resend verification email |
+| POST | `/auth/forgot-password` | — | Send password reset email |
+| POST | `/auth/reset-password` | — | Reset password with token |
+
+### Profile and Assessments
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/profile` | Bearer | Get own profile + results |
+| POST | `/profile/basics` | Bearer (student) | Save profile basics (school, grade, grades, etc.) |
+| GET | `/assessment/riasec` | Bearer (student) | Get saved RIASEC answers |
+| POST | `/assessment/riasec` | Bearer (student) | Save RIASEC answers (batch upsert) |
+| GET | `/assessment/scct` | Bearer (student) | Get saved SCCT answers |
+| POST | `/assessment/scct` | Bearer (student) | Save SCCT answers (batch upsert) |
+| POST | `/results` | Bearer (student) | Compute and store final results |
+| GET | `/results` | Bearer (student) | Get own results |
+
+### AI Counselor
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/ai/explain` | Bearer (student) | One-shot AI explanation of results |
+| GET | `/ai/sessions` | Bearer (student) | List chat sessions |
+| POST | `/ai/sessions` | Bearer (student) | Create new chat session |
+| GET | `/ai/sessions/:id/chat` | Bearer (student) | Get messages in session |
+| POST | `/ai/sessions/:id/chat` | Bearer (student) | Send message to AI, get response |
+| POST | `/admin/seed-knowledge` | Bearer | Manually trigger Vectorize seeding |
+
+### Counselor
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/counselor/departments` | Bearer (counselor) | List own departments |
+| POST | `/counselor/departments` | Bearer (counselor) | Create department |
+| GET | `/counselor/departments/:id` | Bearer (counselor) | Get department details + members |
+| DELETE | `/counselor/departments/:id` | Bearer (counselor) | Delete department |
+| GET | `/counselor/departments/:id/seminars` | Bearer (counselor) | List seminars in department |
+| POST | `/counselor/departments/:id/seminars` | Bearer (counselor) | Create seminar and invite all members |
+| GET | `/counselor/seminars` | Bearer (counselor) | All seminars across all departments |
+| GET | `/counselor/stats` | Bearer (counselor) | Aggregate stats (student counts, strand distribution) |
+| GET | `/counselor/activity` | Bearer (counselor) | Activity feed |
+| GET | `/counselor/students/:id/results` | Bearer (counselor) | View a student's results |
+| POST | `/counselor/ai/events` | Bearer (counselor) | AI-generate seminar suggestions |
+
+### Student Collaboration
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/join/:code` | Bearer (student) | Join department by join code |
+| GET | `/student/departments` | Bearer (student) | List joined departments |
+| GET | `/student/invitations` | Bearer (student) | List seminar invitations |
+| POST | `/student/invitations/:id/respond` | Bearer (student) | Accept or decline seminar invitation |
+
+### Notifications
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/ws/notifications` | Bearer (WS upgrade) | WebSocket — real-time notification stream |
+| GET | `/notifications` | Bearer | Fetch unread notifications |
+| POST | `/notifications/read-all` | Bearer | Mark all notifications as read |
+
+### Schools
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/schools` | — | List active schools |
+
+---
+
+## Cloudflare Configuration
+
+`apps/worker/wrangler.toml`
+
+| Binding | Type | Name/ID | Purpose |
+|---|---|---|---|
+| `DB` | D1 database | `webappcareerlinkai-beta` | Primary SQL store |
+| `RATE_LIMITS` | KV namespace | `2bc63fefc13b4b70841b9e3c69f93faa` | Rate limit counters |
+| `NOTIFICATIONS` | Durable Object | `NotificationDO` | Per-user WebSocket notification hub |
+| `AI` | Workers AI | — | LLaMA inference + embeddings |
+| `KNOWLEDGE` | Vectorize | `careerlinkai-knowledge` (768-dim, cosine) | RAG knowledge base |
+| `ASSETS` | Static assets | `../frontend/dist` | Serves the built frontend SPA |
+
+**Cron trigger:** `0 2 * * *` — daily at 02:00 UTC for scheduled maintenance tasks.
+
+**Compatibility:** `nodejs_compat` flag enabled (for Node.js crypto APIs in the Worker).
 
 ---
 
 ## Local Development
 
+### Prerequisites
+
+- Node.js 20+
+- npm
+- Cloudflare account with Wrangler access (`npx wrangler login`)
+
 ### Setup
 
-1. **Install dependencies:**
-   ```bash
-   npm run install:all
-   ```
+```bash
+# 1. Install all dependencies
+npm run install:all
 
-2. **Verify Wrangler is authenticated:**
-   ```bash
-   npx wrangler whoami
-   ```
+# 2. (Optional) Point frontend to local Worker
+echo "VITE_API_BASE=http://localhost:8787" > apps/frontend/.env
 
-3. **Create `.env` in `apps/frontend/`:**
-   ```env
-   VITE_API_BASE=http://localhost:8787
-   ```
+# 3. Authenticate Wrangler
+npx wrangler whoami
 
-4. **Terminal A — Start Worker:**
-   ```bash
-   npm run dev:worker
-   ```
-   Runs on `http://localhost:8787` with D1 in memory.
+# 4. Initialize remote D1 schema
+npm run db:init
+```
 
-5. **Terminal B — Start Frontend:**
-   ```bash
-   npm run dev:frontend
-   ```
-   Runs on `http://localhost:5173`, calls Worker at `localhost:8787`.
+### Running locally
 
-### Testing Flows
+**Terminal A — Worker:**
+```bash
+npm run dev:worker
+# Runs: wrangler dev --remote (uses remote D1 and KV)
+```
 
-- **Student signup & RIASEC:** Go to landing, sign up, complete RIASEC assessment
-- **SCCT & results:** Continue with SCCT, view recommendations
-- **AI chat:** Click "AI Counselor" and ask a question (first request seeds Vectorize in background)
-- **Counselor login:** Use a counselor account to create departments and view student results
+**Terminal B — Frontend:**
+```bash
+npm run dev:frontend
+# Runs: vite dev on http://localhost:5173
+```
+
+> **Note:** Worker dev uses `--remote` mode. All D1, KV, Vectorize, and Durable Object calls hit Cloudflare's infrastructure. Ensure Wrangler is authenticated and the remote D1 schema is initialised.
+
+---
+
+## Commands
+
+Run from the repository root:
+
+| Command | Description |
+|---|---|
+| `npm run install:all` | Install frontend + worker dependencies |
+| `npm run dev:frontend` | Start Vite dev server (frontend only) |
+| `npm run dev:worker` | Start Worker dev server (`wrangler dev --remote`) |
+| `npm run build` | Build frontend production bundle to `apps/frontend/dist` |
+| `npm run deploy:worker` | Build frontend then deploy Worker + assets via Wrangler |
+| `npm run db:init` | Apply `schema.sql` to remote D1 (idempotent) |
+| `npm run db:init:remote` | Same as `db:init` |
 
 ---
 
 ## Deployment
 
-### Via GitHub Actions (Recommended)
+### Recommended: GitHub Actions (CI/CD)
 
-1. **Set repository secrets** in GitHub:
-   - `CLOUDFLARE_API_TOKEN` (from https://dash.cloudflare.com/profile/api-tokens)
-   - `CLOUDFLARE_ACCOUNT_ID` (from your Cloudflare dashboard)
+`.github/workflows/deploy-worker.yml` triggers on pushes to `master` that touch frontend, worker, or workflow files.
 
-2. **Cloudflare Worker secrets** (set once via CLI or dashboard):
-   ```bash
-   npx wrangler secret put JWT_SECRET
-   npx wrangler secret put FRONTEND_ORIGIN
-   ```
+**Pipeline steps:**
+1. Checkout on `ubuntu-latest`
+2. Install frontend and worker dependencies
+3. Run worker tests (`npm test` in `apps/worker`)
+4. Build frontend (`npm run build`)
+5. Deploy Worker + assets via `cloudflare/wrangler-action`
 
-3. **Push to `master`** — GitHub Actions automatically:
-   - Installs dependencies
-   - Builds frontend bundle
-   - Deploys Worker + assets
-
-### Manual Deployment
+### Manual deployment
 
 ```bash
-# Build
 npm run build
-
-# Deploy
 npm run deploy:worker
 ```
 
 ---
 
-## Cloudflare AI Stack
+## Environment Variables and Secrets
 
-### Architecture
+### GitHub Actions secrets (repository-level)
 
-All AI requests use **Cloudflare's native infrastructure** — no external API keys.
+| Secret | Description |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | Wrangler deploy token |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account identifier |
 
-```
-Student asks question
-    ↓
-POST /ai/explain (or /ai/sessions/:id/chat)
-    ↓
-retrieveContext()  ← embed question + query Vectorize for top-4 docs
-    ↓
-runLlama()  ← inject docs into system prompt, call Llama 3.1 8B via AI Gateway
-    ↓
-Response logged to AI Gateway dashboard (tokens, latency, cost)
-```
+### Cloudflare Worker secrets (`wrangler secret put <NAME>`)
 
-### Components
+| Secret | Required | Description |
+|---|---|---|
+| `JWT_SECRET` | Yes | Long random string for JWT signing |
+| `FRONTEND_ORIGIN` | Yes | Allowed CORS origin (e.g. `https://careerlinkai.online`) |
+| `RESEND_API_KEY` | Yes | Resend transactional email API key |
+| `RESEND_FROM_EMAIL` | No | Sender address (default: `noreply@careerlinkai.online`) |
+| `RESEND_FROM_NAME` | No | Sender display name (default: `CareerLinkAI`) |
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| **Workers AI** | [`ai.ts`](apps/worker/src/ai.ts) | Llama 3.1 8B inference + embeddings (baai/bge) |
-| **Vectorize** | N/A (configured in `wrangler.toml`) | Vector database (768-dim, cosine similarity) |
-| **Knowledge Corpus** | [`knowledge.ts`](apps/worker/src/knowledge.ts) | ~101 docs (strands, RIASEC, SCCT, courses, careers) |
-| **AI Gateway** | `wrangler.toml` (`AI_GATEWAY_ID`) | Request logging & analytics |
-| **Scheduled Cron** | `wrangler.toml` (`[triggers]`) | Daily re-seed at 2 AM UTC |
+### Frontend environment (`.env` in `apps/frontend/`)
 
-### Adding Knowledge
-
-Edit [`apps/worker/src/knowledge.ts`](apps/worker/src/knowledge.ts):
-
-1. **Add strand, RIASEC type, or SCCT construct:**
-   - Push to the respective array at the top (STRANDS, RIASEC_DIMS, SCCT_CONSTRUCTS)
-   - Each has `{ code, name, text }`
-
-2. **Add arbitrary knowledge doc:**
-   - In `buildKnowledgeCorpus()`, create `{ id: 'unique-key', kind: 'category', text: 'content' }`
-   - All docs get embedded and indexed on next seed
-
-3. **Trigger immediate re-seed:**
-   - Call `POST /admin/seed-knowledge` with counselor JWT, OR
-   - Auto-triggers on next AI request (if not yet seeded)
-
-4. **Monitor dashboard:**
-   - **Vectorize:** https://dash.cloudflare.com → Workers & Pages → careerlinkai → Vectorize
-   - **AI Gateway:** https://dash.cloudflare.com → AI → careerlinkai-beta-ai-gateway
-
-### Restricting AI Behavior
-
-Edit system prompts in [`apps/worker/src/index.ts`](apps/worker/src/index.ts):
-
-- **`getExplainAiReply()`** — System prompt for `/ai/explain` (one-off Q&A)
-- **`getCounselorAiReply()`** — System prompt for `/ai/sessions/:id/chat` (multi-turn)
-
-Example restriction to add:
-```typescript
-// In system prompt:
-"Only answer questions about career guidance, RIASEC, SCCT, strands, or academics.
-If asked about unrelated topics, politely redirect to career topics.
-Never give medical, legal, or financial advice."
-```
-
----
-
-## Database Schema
-
-See [`apps/worker/schema.sql`](apps/worker/schema.sql) for the complete schema. Key tables:
-
-- **users** — id, email, password_hash, name, role (student/counselor), created_at
-- **profiles** — user_id, school, strand, gwa, grade_level, gender, birthdate, grades_json
-- **assessment_riasec** — user_id, question_id, answer (1-5), submitted_at
-- **assessment_scct** — user_id, question_id, answer (1-5), submitted_at
-- **results** — user_id, holland_code, riasec_json, scct_json, courses_json, careers_json, generated_at
-- **ai_chat_sessions** — id, student_id, title, created_at, updated_at
-- **ai_chat_messages** — id, session_id, role (student/assistant), content, created_at
-- **departments** — id, counselor_id, name, strand, join_code, created_at
-- **department_members** — department_id, student_id
-- **system_config** — key (ai_enabled, vectorize_seeded), value, updated_at
-- **notifications** — id, user_id, kind, title, body, read, created_at
-
----
-
-## Scoring Method
-
-### RIASEC
-- 48 items total: 8 items per dimension (R, I, A, S, E, C)
-- Dimension score = mean of its 8 item responses (1-5 scale)
-- **Holland Code** = concatenated 3-letter code of top 3 dimensions (highest to lowest average)
-
-### SCCT
-- 12 items grouped into 3 constructs:
-  - **Self-efficacy** (items 1-4) — belief in own ability
-  - **Outcome expectations** (items 5-8) — belief in positive outcomes
-  - **Perceived barriers** (items 9-12) — belief in obstacles
-- Construct score = mean of its 4 items (1-5 scale)
-
-### Course/Career Match
-- Weighted dot product: student's RIASEC vector × course/career's canonical RIASEC profile
-- Match % = rounded dot product result (0-100)
+| Variable | Default | Description |
+|---|---|---|
+| `VITE_API_BASE` | `https://careerlinkai.cejascarldindo.workers.dev` | Worker API base URL |
 
 ---
 
 ## Troubleshooting
 
-### Worker deploy fails: "assets directory missing"
+### `wrangler` command not found
+
+Wrangler is not globally installed. Use `npx wrangler <command>` instead.
+
+### Frontend build fails on Windows with native module error
+
+Vite 4 is pinned to avoid Windows App Control blocking native Rollup binaries. Do not upgrade Vite locally. Run production builds in Linux CI.
+
+### Worker deploy fails: assets directory missing
+
+The frontend must be built before deploying:
 ```bash
-npm run build         # Build frontend bundle first
-npm run deploy:worker # Then deploy
+npm run build
+npm run deploy:worker
 ```
 
-### Frontend can't reach API
-- Check `apps/frontend/.env`: `VITE_API_BASE=http://localhost:8787` (dev) or deployed Worker URL (prod)
-- Ensure Worker is running on `npm run dev:worker`
+### Email not sending locally
 
-### Windows blocks frontend build
-Use Linux CI (GitHub Actions) for production builds. Local Vite builds are pinned to 4.x to avoid native module issues.
+`RESEND_API_KEY` is not set in `wrangler.toml` vars for local dev. Set it as a secret with `wrangler secret put RESEND_API_KEY` or the email send will be skipped with a console warning.
 
-### AI replies are rule-based, not using knowledge
-- Check Vectorize dashboard: confirm `careerlinkai-knowledge` index has ~100 vectors
-- First AI request triggers seeding in background — try again after a few seconds
-- Or manually call `POST /admin/seed-knowledge` to force immediate seed
+### Vectorize RAG returns empty results
 
----
+The knowledge base is seeded automatically on first request after deploy. If it does not auto-seed, call `POST /admin/seed-knowledge` with a valid Bearer token to trigger it manually.
 
-## Security Notes
+### Rate limit 429 on auth endpoints
 
-- **Passwords:** Hashed with PBKDF2-SHA256 (Web Crypto API)
-- **JWTs:** Signed HS256, 30-day expiry
-- **CORS:** Restricted to `FRONTEND_ORIGIN` in production
-- **AI calls:** All routed through Cloudflare infrastructure (never external)
-- **D1 queries:** Parameter-bound (no SQL injection)
-- **Notifications:** WebSocket over Durable Objects (real-time, one-to-many broadcast)
-
----
-
-## Support
-
-- **Questions about features?** Check the relevant page or route in the navigation guide above.
-- **Need to add/modify knowledge?** Edit [`apps/worker/src/knowledge.ts`](apps/worker/src/knowledge.ts) and re-seed.
-- **Need to change AI behavior?** Edit system prompts in [`apps/worker/src/index.ts`](apps/worker/src/index.ts).
-- **Issues or feedback?** See [CLAUDE.md](CLAUDE.md) for developer tips.
+Auth endpoints (signup, signin, forgot-password) are rate-limited per IP using Cloudflare KV. Wait for the window to reset (the response includes `retryAfter` in seconds).

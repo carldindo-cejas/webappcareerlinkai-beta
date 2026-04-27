@@ -40,6 +40,12 @@ jobs:
       - name: Install worker dependencies
         run: npm ci --prefix apps/worker
 
+      - name: Type-check worker
+        run: npm --prefix apps/worker run typecheck
+
+      - name: Run worker tests
+        run: npm --prefix apps/worker test
+
       - name: Build frontend production bundle
         run: npm --prefix apps/frontend run build
 

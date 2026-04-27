@@ -3,7 +3,7 @@ import PortalLayout from '../components/PortalLayout';
 import { counselorNavItems } from '../lib/portalNav';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { SCHOOLS } from '../data/schools';
+import { useSchools } from '../data/schools';
 
 type CounselorProfile = {
   firstName?: string;
@@ -22,6 +22,7 @@ export default function CounselorSettings() {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [school, setSchool] = useState('');
+  const { schools, loadingSchools } = useSchools();
   const [loadingProfile, setLoadingProfile] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileMsg, setProfileMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
@@ -141,9 +142,9 @@ export default function CounselorSettings() {
                 </div>
                 <div className="sm:col-span-2">
                   <label className="block text-[13px] font-medium mb-2">School</label>
-                  <select className="input" value={school} onChange={e => setSchool(e.target.value)}>
-                    <option value="">Choose your school</option>
-                    {SCHOOLS.map(s => <option key={s} value={s}>{s}</option>)}
+                  <select className="input" value={school} onChange={e => setSchool(e.target.value)} disabled={loadingSchools}>
+                    <option value="">{loadingSchools ? 'Loading…' : 'Choose your school'}</option>
+                    {schools.map((s: string) => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
               </div>

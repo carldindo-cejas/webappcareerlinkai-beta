@@ -1,6 +1,10 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import Landing from './pages/Landing';
 import SignIn from './pages/SignIn';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
+import VerifyEmail from './pages/VerifyEmail';
+import CheckYourEmail from './pages/CheckYourEmail';
 import ProfileBasics from './pages/ProfileBasics';
 import StartEvaluation from './pages/StartEvaluation';
 import Onboarding from './pages/Onboarding';
@@ -37,6 +41,10 @@ export default function App() {
       <Route path="/" element={<Landing />} />
       <Route path="/signin" element={<SignIn />} />
       <Route path="/signup" element={<SignIn mode="signup" />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/verify-email" element={<VerifyEmail />} />
+      <Route path="/check-your-email" element={<CheckYourEmail />} />
 
       <Route path="/profile/basics" element={<Protected role="student"><ProfileBasics /></Protected>} />
       <Route path="/start-evaluation" element={<Protected role="student"><StartEvaluation /></Protected>} />

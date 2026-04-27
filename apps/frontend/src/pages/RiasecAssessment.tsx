@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import TopNav, { SaveStatus } from '../components/TopNav';
 import { RIASEC_ITEMS } from '../data/riasec';
 import { api } from '../lib/api';
+import { useToast } from '../lib/toast';
 
 function shuffleItems<T>(items: readonly T[]): T[] {
   const out = [...items];
@@ -14,10 +15,12 @@ function shuffleItems<T>(items: readonly T[]): T[] {
 }
 
 export default function RiasecAssessment() {
+  const { showToast } = useToast();
   const [items] = useState(() => shuffleItems(RIASEC_ITEMS));
   const [answers, setAnswers] = useState<Record<number, number>>({});
   const [idx, setIdx] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  const [saveErrorShown, setSaveErrorShown] = useState(false);
   const nav = useNavigate();
   const total = items.length;
   const item = items[idx];
@@ -29,19 +32,27 @@ export default function RiasecAssessment() {
         const firstUnanswered = items.findIndex(q => !(q.id in r.answers));
         if (firstUnanswered >= 0) setIdx(firstUnanswered);
       }
-    }).catch(() => {});
-  }, [items]);
+    }).catch(() => {
+      showToast('error', 'Could not load your previous answers. Starting fresh.');
+    });
+  }, [items, showToast]);
 
   const select = useCallback(
     (value: number) => {
       const updated = { ...answers, [item.id]: value };
       setAnswers(updated);
-      api('/assessment/riasec', { method: 'PUT', body: JSON.stringify({ id: item.id, value }) }).catch(() => {});
+      api('/assessment/riasec', { method: 'PUT', body: JSON.stringify({ id: item.id, value }) }).catch(() => {
+        // Throttle: only show once per session — autosave fires on every answer.
+        if (!saveErrorShown) {
+          setSaveErrorShown(true);
+          showToast('error', 'Your answers may not be saving. Check your connection.');
+        }
+      });
       setTimeout(() => {
         if (idx < total - 1) setIdx(idx + 1);
       }, 220);
     },
-    [answers, item, idx, total]
+    [answers, item, idx, total, saveErrorShown, showToast]
   );
 
   const go = (d: -1 | 1) => {
@@ -60,10 +71,17 @@ export default function RiasecAssessment() {
   }, [select, idx]);
 
   async function finish() {
+    const unanswered = items.filter(q => !(q.id in answers)).length;
+    if (unanswered > 0) {
+      showToast('error', `${unanswered} question${unanswered > 1 ? 's' : ''} still unanswered. Use the dots below to navigate back.`);
+      return;
+    }
     setSubmitting(true);
     try {
       await api('/assessment/riasec/submit', { method: 'POST' });
       nav('/assessment/scct');
+    } catch {
+      showToast('error', 'Could not submit. Please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -81,7 +99,7 @@ export default function RiasecAssessment() {
 
   return (
     <div className="min-h-screen">
-      <TopNav sticky right={<div className="flex items-center gap-4 sm:gap-6"><SaveStatus /><a href="#" onClick={e => { e.preventDefault(); nav('/'); }} className="text-sm text-ink-500 hover:text-ink-900">Save & exit</a></div>} />
+      <TopNav sticky right={<div className="flex items-center gap-4 sm:gap-6"><SaveStatus /><button type="button" onClick={() => nav('/')} className="text-sm text-ink-500 hover:text-ink-900">Save &amp; exit</button></div>} />
 
       <div className="bg-cream-50 border-b border-cream-300 px-4 sm:px-8 py-5">
         <div className="max-w-[1200px] mx-auto flex flex-wrap items-center gap-4 sm:gap-8">

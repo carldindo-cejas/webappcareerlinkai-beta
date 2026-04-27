@@ -13,6 +13,12 @@ binding = "DB"
 database_name = "webappcareerlinkai-beta"
 database_id = "a9b922e5-0e01-4038-80a7-0f97f05a5c38"
 
+# KV namespace for rate limit counters.
+# Create once: `wrangler kv namespace create RATE_LIMITS`.
+[[kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "2bc63fefc13b4b70841b9e3c69f93faa"
+
 [durable_objects]
 bindings = [{ name = "NOTIFICATIONS", class_name = "NotificationDO" }]
 
@@ -23,9 +29,11 @@ new_sqlite_classes = ["NotificationDO"]
 [vars]
 # For local dev only. In production use `wrangler secret put JWT_SECRET`.
 JWT_SECRET = "dev-secret-change-me-to-a-long-random-string"
-FRONTEND_ORIGIN = "https://careerlinkai.cejascarldindo.workers.dev"
+FRONTEND_ORIGIN = "https://careerlinkai.online"
 # Cloudflare AI Gateway slug — create once via `wrangler ai-gateway create careerlinkai-ai`.
 AI_GATEWAY_ID = "careerlinkai-beta-ai-gateway"
+RESEND_FROM_EMAIL = "noreply@careerlinkai.online"
+RESEND_FROM_NAME = "CareerLinkAI"
 
 [ai]
 binding = "AI"

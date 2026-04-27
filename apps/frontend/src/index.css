@@ -96,6 +96,17 @@
     box-shadow: 0 0 0 3px rgba(31, 77, 63, 0.08);
   }
   .input::placeholder { color: #A8A296; }
+
+  /* Visible focus ring for keyboard navigation (WCAG 2.4.7) */
+  :focus-visible {
+    outline: 2px solid #1F4D3F;
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+  /* Inputs already show focus via border + shadow — suppress duplicate ring */
+  .input:focus-visible {
+    outline: none;
+  }
 }
 
 @layer utilities {

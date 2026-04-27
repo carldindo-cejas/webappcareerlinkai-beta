@@ -3,6 +3,7 @@ import PortalLayout from '../components/PortalLayout';
 import { studentNavItems } from '../lib/portalNav';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { useToast } from '../lib/toast';
 
 type Session = {
   id: number;
@@ -200,6 +201,7 @@ function AssistantBubbleContent({
 
 export default function StudentAICounselor() {
   const { user } = useAuth();
+  const { showToast } = useToast();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -228,6 +230,7 @@ export default function StudentAICounselor() {
       }
     } catch {
       setSessions([]);
+      showToast('error', 'Could not load your chat sessions.');
     } finally {
       setLoading(false);
     }
@@ -249,6 +252,7 @@ export default function StudentAICounselor() {
       );
     } catch {
       setMessages([]);
+      showToast('error', 'Could not load this conversation.');
     } finally {
       setMessagesLoading(false);
     }
@@ -261,7 +265,9 @@ export default function StudentAICounselor() {
       setActiveSessionId(session.id);
       setMessages([]);
       setShowSidebar(false);
-    } catch { /* ignore */ }
+    } catch {
+      showToast('error', 'Could not start a new chat.');
+    }
   }
 
   async function deleteSession(id: number) {
@@ -277,7 +283,9 @@ export default function StudentAICounselor() {
           setMessages([]);
         }
       }
-    } catch { /* ignore */ }
+    } catch {
+      showToast('error', 'Could not delete this conversation.');
+    }
   }
 
   async function send(e: FormEvent | null, overrideText?: string) {

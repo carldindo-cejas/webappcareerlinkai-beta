@@ -2,7 +2,8 @@ import { useEffect, useState, FormEvent } from 'react';
 import { Link, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import Logo from '../components/Logo';
 import { useAuth } from '../lib/auth';
-import { SCHOOLS } from '../data/schools';
+import { ApiError } from '../lib/api';
+import { useSchools } from '../data/schools';
 import { isValidJoinCode, normalizeJoinCode } from '../lib/joinCode';
 
 const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
@@ -39,6 +40,7 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<FormField, boolean>>>({});
   const [busy, setBusy] = useState(false);
   const { signIn, signUp } = useAuth();
+  const { schools, loadingSchools } = useSchools();
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -81,8 +83,12 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
     markFieldErrors(fields);
   }
 
-  function inputClass(field: FormField): string {
-    return `input ${fieldErrors[field] ? INPUT_ERROR_CLASS : ''}`;
+  function inputAttrs(field: FormField) {
+    return {
+      className: `input ${fieldErrors[field] ? INPUT_ERROR_CLASS : ''}`,
+      'aria-required': 'true' as const,
+      'aria-invalid': (fieldErrors[field] ? 'true' : undefined) as 'true' | undefined,
+    };
   }
 
   async function onSubmit(e: FormEvent) {
@@ -145,20 +151,25 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
 
     setBusy(true);
     try {
-      const user =
-        mode === 'signin'
-          ? await signIn(emailValue, password, role)
-          : await signUp({
-            firstName,
-            lastName,
-            email: emailValue,
-            password,
-            role,
-            school: role === 'counselor' ? school : undefined,
-            inviteCode: role === 'student' ? invite : undefined,
-            acceptedPolicies
-          });
+      if (mode === 'signup') {
+        const result = await signUp({
+          firstName,
+          lastName,
+          email: emailValue,
+          password,
+          role,
+          school: role === 'counselor' ? school : undefined,
+          inviteCode: role === 'student' ? invite : undefined,
+          acceptedPolicies
+        });
+        navigate(`/check-your-email?email=${encodeURIComponent(result.email)}`, {
+          replace: true,
+          state: { verifyUrl: result.verifyUrl, emailDelivered: result.emailDelivered ?? true }
+        });
+        return;
+      }
 
+      const user = await signIn(emailValue, password, role);
       const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
       if (user.role === 'counselor') {
         navigate(from?.startsWith('/portal/counselor') ? from : '/portal/counselor', { replace: true });
@@ -170,6 +181,12 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
         navigate('/start-evaluation');
       }
     } catch (e: any) {
+      // Unverified-account path: server returns 403 with a string about verification.
+      // Ship them to /check-your-email so they can resend the link.
+      if (e instanceof ApiError && e.status === 403 && /verify/i.test(String(e?.message || ''))) {
+        navigate(`/check-your-email?email=${encodeURIComponent(emailValue)}`, { replace: true });
+        return;
+      }
       const message = e?.message || 'Something went wrong.';
       setErr(message);
 
@@ -274,29 +291,25 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
             {mode === 'signup' && (
               <div className="grid sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-[13px] font-medium mb-2">First name</label>
+                  <label htmlFor="signin-firstName" className="block text-[13px] font-medium mb-2">First name</label>
                   <input
-                    className={inputClass('firstName')}
+                    id="signin-firstName"
+                    {...inputAttrs('firstName')}
                     required
                     value={firstName}
-                    onChange={e => {
-                      setFirstName(e.target.value);
-                      clearFieldError('firstName');
-                    }}
+                    onChange={e => { setFirstName(e.target.value); clearFieldError('firstName'); }}
                     placeholder="First name"
                     autoComplete="given-name"
                   />
                 </div>
                 <div>
-                  <label className="block text-[13px] font-medium mb-2">Last name</label>
+                  <label htmlFor="signin-lastName" className="block text-[13px] font-medium mb-2">Last name</label>
                   <input
-                    className={inputClass('lastName')}
+                    id="signin-lastName"
+                    {...inputAttrs('lastName')}
                     required
                     value={lastName}
-                    onChange={e => {
-                      setLastName(e.target.value);
-                      clearFieldError('lastName');
-                    }}
+                    onChange={e => { setLastName(e.target.value); clearFieldError('lastName'); }}
                     placeholder="Last name"
                     autoComplete="family-name"
                   />
@@ -305,48 +318,53 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
             )}
             {mode === 'signup' && role === 'counselor' && (
               <div>
-                <label className="block text-[13px] font-medium mb-2">School</label>
+                <label htmlFor="signin-school" className="block text-[13px] font-medium mb-2">School</label>
                 <select
-                  className={inputClass('school')}
+                  id="signin-school"
+                  {...inputAttrs('school')}
                   required
                   value={school}
-                  onChange={e => {
-                    setSchool(e.target.value);
-                    clearFieldError('school');
-                  }}
+                  disabled={loadingSchools}
+                  onChange={e => { setSchool(e.target.value); clearFieldError('school'); }}
                 >
-                  <option value="">Choose your school</option>
-                  {SCHOOLS.map(s => <option key={s} value={s}>{s}</option>)}
+                  <option value="">{loadingSchools ? 'Loading…' : 'Choose your school'}</option>
+                  {schools.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
             )}
             <div>
-              <label className="block text-[13px] font-medium mb-2">School email</label>
+              <label htmlFor="signin-email" className="block text-[13px] font-medium mb-2">School email</label>
               <input
-                className={inputClass('email')}
+                id="signin-email"
+                {...inputAttrs('email')}
                 type="email"
                 required
                 value={email}
-                onChange={e => {
-                  setEmail(e.target.value);
-                  clearFieldError('email');
-                }}
+                onChange={e => { setEmail(e.target.value); clearFieldError('email'); }}
                 placeholder="you@school.edu.ph"
                 autoComplete="email"
               />
             </div>
             <div>
-              <label className="block text-[13px] font-medium mb-2">Password</label>
+              <div className="flex items-center justify-between mb-2">
+                <label htmlFor="signin-password" className="block text-[13px] font-medium">Password</label>
+                {mode === 'signin' && (
+                  <Link
+                    to="/forgot-password"
+                    className="text-[12px] text-forest-700 hover:text-forest-900 underline-offset-2 hover:underline"
+                  >
+                    Forgot password?
+                  </Link>
+                )}
+              </div>
               <input
-                className={inputClass('password')}
+                id="signin-password"
+                {...inputAttrs('password')}
                 type="password"
                 required
                 minLength={8}
                 value={password}
-                onChange={e => {
-                  setPassword(e.target.value);
-                  clearFieldError('password');
-                }}
+                onChange={e => { setPassword(e.target.value); clearFieldError('password'); }}
                 placeholder={mode === 'signup' ? '8+ chars with upper/lower/number/special' : 'Enter your password'}
                 autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
               />
@@ -357,17 +375,15 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
 
             {mode === 'signup' && (
               <div>
-                <label className="block text-[13px] font-medium mb-2">Confirm password</label>
+                <label htmlFor="signin-confirmPassword" className="block text-[13px] font-medium mb-2">Confirm password</label>
                 <input
-                  className={inputClass('confirmPassword')}
+                  id="signin-confirmPassword"
+                  {...inputAttrs('confirmPassword')}
                   type="password"
                   required
                   minLength={8}
                   value={confirmPassword}
-                  onChange={e => {
-                    setConfirmPassword(e.target.value);
-                    clearFieldError('confirmPassword');
-                  }}
+                  onChange={e => { setConfirmPassword(e.target.value); clearFieldError('confirmPassword'); }}
                   placeholder="Retype your password"
                   autoComplete="new-password"
                 />
@@ -377,17 +393,15 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
             {role === 'student' && mode === 'signup' && (
               <div>
                 <div>
-                  <label className="block text-[13px] font-medium mb-2">
-                  Department invitation code or ID
+                  <label htmlFor="signin-inviteCode" className="block text-[13px] font-medium mb-2">
+                    Department invitation code or ID
                   </label>
                   <input
-                    className={inputClass('inviteCode')}
+                    id="signin-inviteCode"
+                    {...inputAttrs('inviteCode')}
                     required
                     value={inviteCode}
-                    onChange={e => {
-                      setInviteCode(e.target.value);
-                      clearFieldError('inviteCode');
-                    }}
+                    onChange={e => { setInviteCode(e.target.value); clearFieldError('inviteCode'); }}
                     placeholder="Enter code from your counselor"
                   />
                 </div>
@@ -455,10 +469,10 @@ export default function SignIn({ mode: initialMode }: { mode?: 'signin' | 'signu
       </main>
 
       {activePolicy && (
-        <div className="fixed inset-0 z-50 bg-ink-900/50 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-50 bg-ink-900/50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="policy-dialog-title">
           <div className="w-full max-w-2xl bg-white border border-cream-300 rounded-lg shadow-xl">
             <div className="px-6 py-4 border-b border-cream-300 flex items-center justify-between">
-              <h3 className="text-xl font-medium">
+              <h3 id="policy-dialog-title" className="text-xl font-medium">
                 {activePolicy === 'terms' ? 'Terms and Conditions' : 'Privacy Policy'}
               </h3>
               <button
